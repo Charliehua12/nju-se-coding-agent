@@ -56,7 +56,7 @@ python main.py
 | `/clear` | 清空当前会话 |
 | `/plan` | 切换计划模式（先出计划并**人工确认**后执行） |
 | `/approve` | 切换审查模式（改文件/执行命令前逐个确认） |
-| `/review` | 查看/回滚 agent 的全部改动（`/review revert <序号\|all>`） |
+| `/review` | 查看/回滚改动（`/review git` 看 git diff，`/review git reset` 回滚 checkpoint） |
 | `/usage` | 显示累计 token 消耗 |
 | `/help` | 显示帮助 |
 | `exit` / `quit` | 退出 |
@@ -114,6 +114,10 @@ python main.py
 
 **所有文件改动都会被记录**（`Workspace.changes`），随时用 `/review` 查看每个操作的统一 diff，并用 `/review revert <序号|all>` 按需**回滚**。整个链路：计划审查（事前）→ 工具审批（事中）→ 改动审查与回滚（事后）。
 
+### 5. Git 集成：自动 checkpoint
+
+进入 REPL 时若工作目录**不是**已有 git 仓库，会自动 `git init`（仓库内身份，不污染全局配置），每轮任务有改动就**自动提交 checkpoint**（commit message 用模型的总结）。`/review git` 查看最近一个 checkpoint 的 diff——能覆盖 `execute_command` 的副作用（构建产物、安装的依赖等文件工具追踪不到的部分）；`/review git reset` 一键回滚到上一 checkpoint。若工作目录**已是** git 仓库（如你自己的项目），自动进入「只读监视」模式，不做自动提交与破坏性回滚。
+
 ### 5. 上下文有预算、有上限
 
 - 三级压缩：截断旧工具输出 → LLM 摘要早期历史 → 兜底丢弃最旧轮次，始终保住 `system` 与原始任务；
@@ -140,6 +144,7 @@ agent.py         主循环 + 终止条件 + 并发执行 + 计划/摘要编排 +
 llm.py           ChatProvider 协议 + DeepSeek 客户端（标准库 HTTP + SSE 流式解析）
 context.py       对话历史、token 估算、三级上下文压缩、过载保护
 session.py       会话管理：多会话创建/切换/删除/持久化
+gitwrap.py       Git 集成：自动 init + 每轮任务 checkpoint + git diff/回滚
 markdown.py      轻量 Markdown → ANSI 终端渲染器（纯标准库，流式按行缓冲）
 parser.py        模型输出解析（工具参数 JSON 容错、content 兜底识别）
 config.py        配置（环境变量 / .env）

@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from config import Config
+from gitwrap import GitWrap
 from llm import DeepSeekClient
 from markdown import MarkdownRenderer, render_markdown
 from session import SessionManager
@@ -93,9 +94,12 @@ def _print_usage(client: DeepSeekClient) -> None:
           f"（共 {u.total_tokens}）{RESET}")
 
 
-def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config, args) -> int:
+def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config, args,
+                 gwrap: GitWrap) -> int:
     print(f"{DIM}工作目录：{config.workdir}{RESET}")
     print(f"{DIM}模型：{config.model}{RESET}\n")
+    mode = gwrap.init()
+    print(f"{DIM}git 模式：{'自动 checkpoint' if mode == 'checkpoint' else '只读监视（已有仓库）'}{RESET}")
     agent = manager.current_agent() or manager.new()
     agent.approve = bool(config.approve)
     streamed: list[str] = []
@@ -117,6 +121,8 @@ def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config
     print(f"{GREEN}{BOLD}===== 任务完成 ====={RESET}")
     if not streamed:  # 最终回答未流式输出（例如中途报错）时才补打印
         print(render_markdown(final))
+    if gwrap.checkpoint(final):
+        print(f"{DIM}已创建 git checkpoint{RESET}")
 
     _print_usage(client)
     if args.save:
@@ -129,7 +135,7 @@ def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config
 
 
 def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionManager,
-                    client: DeepSeekClient, ws: Workspace) -> tuple[bool, bool]:
+                    client: DeepSeekClient, ws: Workspace, gwrap: GitWrap) -> tuple[bool, bool]:
     """处理 / 开头的交互命令，返回新的 (plan_mode, approve)。"""
     parts = line.split(maxsplit=1)
     c = parts[0].lower()
@@ -215,7 +221,7 @@ def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionM
         plan_mode = not plan_mode
         print(f"计划模式：{'开' if plan_mode else '关'}")
     elif c == "/review":
-        _review_changes(ws, arg)
+        _review_changes(ws, arg, gwrap)
     elif c == "/approve":
         approve = not approve
         manager.approve = approve
@@ -255,12 +261,22 @@ def _show_change(ws: Workspace, ch) -> None:
         print(_colorize_diff(diff))
 
 
-def _review_changes(ws: Workspace, arg: str) -> None:
-    """/review 命令：查看 agent 的改动，支持按序号/全部回滚。"""
-    if not ws.changes:
-        print("（当前没有任何文件改动）")
-        return
+def _review_changes(ws: Workspace, arg: str, gwrap: GitWrap) -> None:
+    """/review 命令：查看改动（工具级 diff 或 git diff），支持回滚。"""
     sub = arg.lower()
+    if sub.startswith("git"):
+        rest = sub[len("git"):].strip()
+        if rest == "reset":
+            print(gwrap.reset_all())
+            ws.changes.clear()  # git 已整体回滚，同步清空工具级改动日志
+            return
+        diff = gwrap.show_diff()
+        print(f"{BOLD}git diff{RESET}")
+        print(_colorize_diff(diff) if diff.strip() else "(工作区干净)")
+        return
+    if not ws.changes:
+        print("（当前没有任何文件改动；可用 /review git 查看 git 改动）")
+        return
     if sub.startswith("revert"):
         rest = sub[len("revert"):].strip()
         if rest == "all":
@@ -277,7 +293,7 @@ def _review_changes(ws: Workspace, arg: str) -> None:
             ws.revert_change(ch)
             print(f"已回滚第 {n} 项：{ch.action} {ch.path}")
         else:
-            print("用法：/review revert <序号|all>")
+            print("用法：/review revert <序号|all>；/review git [reset] 查看/回滚 git 改动")
     elif sub.isdigit():
         n = int(sub)
         if not (1 <= n <= len(ws.changes)):
@@ -285,15 +301,17 @@ def _review_changes(ws: Workspace, arg: str) -> None:
             return
         _show_change(ws, ws.changes[n - 1])
     else:
-        print(f"{BOLD}共 {len(ws.changes)} 项改动：{RESET}")
+        print(f"{BOLD}共 {len(ws.changes)} 项工具改动：{RESET}")
         for ch in ws.changes:
             _show_change(ws, ch)
 
 
 def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
-          ws: Workspace, approve_cb) -> int:
+          ws: Workspace, approve_cb, gwrap: GitWrap) -> int:
     print(f"{DIM}工作目录：{config.workdir}{RESET}")
     print(f"{DIM}模型：{config.model}{RESET}")
+    mode = gwrap.init()
+    print(f"{DIM}git 模式：{'自动 checkpoint' if mode == 'checkpoint' else '只读监视（已有仓库）'}{RESET}")
     print(f"{DIM}进入交互对话模式。{RESET}{DIM}{BOLD}/help{RESET}{DIM} 查看命令，{RESET}"
           f"{DIM}{BOLD}exit{RESET}{DIM} 退出。{RESET}\n")
     if manager.current_agent() is None:
@@ -317,7 +335,7 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
             print("再见。")
             break
         if line.startswith("/"):
-            plan_mode, approve = _handle_command(line, plan_mode, approve, manager, client, ws)
+            plan_mode, approve = _handle_command(line, plan_mode, approve, manager, client, ws, gwrap)
             continue
 
         agent = manager.current_agent() or manager.new()
@@ -345,6 +363,8 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
         new_changes = len(ws.changes) - start_changes
         if new_changes:
             print(f"{DIM}本次改动 {new_changes} 项，/review 查看 diff 或回滚{RESET}")
+        if gwrap.checkpoint(final):
+            print(f"{DIM}已创建 git checkpoint{RESET}")
         print()
     return 0
 
@@ -382,6 +402,7 @@ def main() -> int:
     ws = Workspace(config.workdir, confirm=confirm, max_output_chars=config.max_output_chars)
     client = DeepSeekClient(config)
     manager = SessionManager(config, client, ToolRegistry(ws))
+    gwrap = GitWrap(config.workdir)
 
     def approve_cb(action: str, full_preview: str, short_preview: str) -> bool:
         # 动态读取当前开关：REPL 里 /approve 切换即时生效
@@ -413,8 +434,8 @@ def main() -> int:
             return 1
 
     if args.task:
-        return _single_shot(manager, client, config, args)
-    return _repl(manager, client, config, args, ws, approve_cb)
+        return _single_shot(manager, client, config, args, gwrap)
+    return _repl(manager, client, config, args, ws, approve_cb, gwrap)
 
 
 if __name__ == "__main__":
