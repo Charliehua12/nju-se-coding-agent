@@ -1,7 +1,7 @@
 编程智能体（DeepSeek 驱动）
 
 一、仓库地址
-<在此填写你的公开 GitHub / Gitee 仓库地址>
+https://github.com/Charliehua12/nju-se-coding-agent
 
 二、如何运行
 1. 环境：Python 3.10+，无需安装任何第三方库（仅用标准库）。
