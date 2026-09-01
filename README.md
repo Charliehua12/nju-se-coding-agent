@@ -2,7 +2,7 @@
 
 一个运行在本地、通过与大语言模型交互来自主读写文件、执行命令、完成编程任务的智能体——类似一个极简的 Claude Code / Codex / OpenCode。
 
-- **模型**：DeepSeek（OpenAI 兼容接口，`deepseek-chat`）
+- **模型**：DeepSeek（OpenAI 兼容接口，默认 `deepseek-v4-flash`）
 - **语言**：Python 3.10+
 - **依赖**：**零第三方依赖**——连 HTTP 层、SSE 流式解析、token 估算、单元测试，全部只用标准库
 

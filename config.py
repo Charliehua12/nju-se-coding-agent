@@ -30,7 +30,7 @@ def load_dotenv(path: Path | None = None) -> None:
 class Config:
     api_key: str
     base_url: str = "https://api.deepseek.com"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"  # 便宜快速的 flash 模型
     temperature: float = 0.2
     max_iterations: int = 25
     context_budget_tokens: int = 40_000  # 上下文预算（DeepSeek 上下文上限预留余量）
@@ -56,7 +56,7 @@ class Config:
         return cls(
             api_key=api_key,
             base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/"),
-            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+            model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
             temperature=float(os.environ.get("AGENT_TEMPERATURE", "0.2")),
             max_iterations=int(os.environ.get("AGENT_MAX_ITERATIONS", "25")),
             context_budget_tokens=int(os.environ.get("AGENT_CONTEXT_BUDGET", "40000")),
