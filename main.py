@@ -1,10 +1,10 @@
 """命令行入口。
 
 两种模式：
-  1. 单次执行：python main.py "任务描述" [--plan] [--ask] [--workdir ...] [--save ...]
-  2. 交互对话：python main.py （不带任务参数进入 REPL，持续多轮对话）
+  1. 单次执行：python main.py "任务描述" [--plan] [--ask] [--workdir ...] [--save ...] [--resume ...]
+  2. 交互对话：python main.py （进入 REPL，支持多会话切换与持久化）
 
-交互模式下可用的命令：/plan、/save <文件>、/clear、/usage、/help，exit 退出。
+交互命令：/new、/list、/switch、/del、/save、/load、/clear、/plan、/usage、/help，exit 退出。
 """
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ import json
 import sys
 from pathlib import Path
 
-from agent import Agent
 from config import Config
 from llm import DeepSeekClient
+from session import SessionManager
 from tools import ToolRegistry, Workspace
 
 # 轻量 ANSI 颜色（不引入 rich）
@@ -56,18 +56,18 @@ def _print_usage(client: DeepSeekClient) -> None:
           f"（共 {u.total_tokens}）{RESET}")
 
 
-def _single_shot(agent: Agent, client: DeepSeekClient, config: Config, args, history) -> int:
+def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config, args) -> int:
     print(f"{DIM}工作目录：{config.workdir}{RESET}")
     print(f"{DIM}模型：{config.model}{RESET}\n")
+    agent = manager.current_agent() or manager.new()
     streamed: list[str] = []
     on_text, on_plan, on_tool_call, on_tool_result = _make_callbacks(streamed)
     if args.plan:
         print(f"{BOLD}{MAGENTA}── 制定执行计划 ──{RESET}")
 
-    final = agent.run(
+    final = agent.reply(
         args.task,
         plan_first=args.plan,
-        history=history,
         on_text=on_text,
         on_plan=on_plan,
         on_tool_call=on_tool_call,
@@ -80,31 +80,83 @@ def _single_shot(agent: Agent, client: DeepSeekClient, config: Config, args, his
 
     _print_usage(client)
     if args.save:
-        _save(agent, args.save)
+        try:
+            manager.save(args.save)
+            print(f"{DIM}会话已保存到 {args.save}{RESET}")
+        except OSError as e:
+            print(f"[错误] 保存会话失败：{e}")
     return 0
 
 
-def _handle_command(line: str, plan_mode: bool, agent: Agent, client: DeepSeekClient) -> bool:
+def _handle_command(line: str, plan_mode: bool, manager: SessionManager, client: DeepSeekClient) -> bool:
     """处理 / 开头的交互命令，返回新的 plan_mode。"""
     parts = line.split(maxsplit=1)
     c = parts[0].lower()
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
     if c == "/help":
         print("可用命令：")
-        print(f"  {BOLD}/plan{RESET}        切换计划模式（当前 {'开' if plan_mode else '关'}）")
-        print(f"  {BOLD}/save <文件>{RESET}  保存当前会话（默认 session.json）")
-        print(f"  {BOLD}/clear{RESET}       清空对话，重新开始")
-        print(f"  {BOLD}/usage{RESET}       显示累计 token 消耗")
-        print(f"  {BOLD}/help{RESET}        显示本帮助")
-        print(f"  {BOLD}exit{RESET}          退出")
+        print(f"  {BOLD}/new [名称]{RESET}    新建会话（缺省自动命名）")
+        print(f"  {BOLD}/list{RESET}         列出所有会话")
+        print(f"  {BOLD}/switch <名称>{RESET} 切换到指定会话")
+        print(f"  {BOLD}/del <名称>{RESET}    删除指定会话")
+        print(f"  {BOLD}/save [文件]{RESET}   保存全部会话（默认 sessions.json）")
+        print(f"  {BOLD}/load <文件>{RESET}   从文件加载会话")
+        print(f"  {BOLD}/clear{RESET}         清空当前会话")
+        print(f"  {BOLD}/plan{RESET}          切换计划模式（当前 {'开' if plan_mode else '关'}）")
+        print(f"  {BOLD}/usage{RESET}         显示累计 token 消耗")
+        print(f"  {BOLD}exit{RESET}            退出")
+    elif c == "/new":
+        try:
+            manager.new(arg or None)
+            print(f"已新建并切换到会话 '{manager.current}'")
+        except ValueError as e:
+            print(f"[错误] {e}")
+    elif c == "/list":
+        if not manager.names():
+            print("（暂无会话）")
+        for n in manager.names():
+            mark = " *" if n == manager.current else ""
+            count = len(manager.sessions[n].dump_history())
+            print(f"  {n}{mark}  （{count} 条消息）")
+    elif c == "/switch":
+        if not arg:
+            print("用法：/switch <名称>")
+        elif manager.switch(arg) is None:
+            print(f"[错误] 会话 '{arg}' 不存在")
+        else:
+            print(f"已切换到会话 '{arg}'")
+    elif c == "/del":
+        if not arg:
+            print("用法：/del <名称>")
+        elif not manager.remove(arg):
+            print(f"[错误] 会话 '{arg}' 不存在")
+        else:
+            print(f"已删除会话 '{arg}'，当前：'{manager.current}'")
+    elif c == "/save":
+        fname = arg or "sessions.json"
+        try:
+            manager.save(fname)
+            print(f"已保存 {len(manager.names())} 个会话到 {fname}")
+        except OSError as e:
+            print(f"[错误] 保存失败：{e}")
+    elif c == "/load":
+        if not arg:
+            print("用法：/load <文件>")
+        else:
+            try:
+                manager.load(arg)
+                print(f"已加载 {len(manager.names())} 个会话（当前：'{manager.current}'）")
+            except (OSError, json.JSONDecodeError, ValueError) as e:
+                print(f"[错误] 加载失败：{e}")
+    elif c == "/clear":
+        agent = manager.current_agent()
+        if agent:
+            agent.clear()
+        print("当前会话已清空。")
     elif c == "/plan":
         plan_mode = not plan_mode
         print(f"计划模式：{'开' if plan_mode else '关'}")
-    elif c == "/save":
-        fname = parts[1].strip() if len(parts) > 1 else "session.json"
-        _save(agent, fname)
-    elif c == "/clear":
-        agent.clear()
-        print("对话已清空，重新开始。")
     elif c == "/usage":
         u = client.usage
         print(f"{u.prompt_tokens} prompt + {u.completion_tokens} completion（共 {u.total_tokens}）")
@@ -113,27 +165,19 @@ def _handle_command(line: str, plan_mode: bool, agent: Agent, client: DeepSeekCl
     return plan_mode
 
 
-def _save(agent: Agent, fname: str) -> None:
-    try:
-        Path(fname).write_text(
-            json.dumps(agent.dump_history(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"{DIM}会话已保存到 {fname}{RESET}")
-    except OSError as e:
-        print(f"[错误] 保存会话失败：{e}")
-
-
-def _repl(agent: Agent, client: DeepSeekClient, config: Config, args) -> int:
+def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args) -> int:
     print(f"{DIM}工作目录：{config.workdir}{RESET}")
     print(f"{DIM}模型：{config.model}{RESET}")
-    print(f"{DIM}进入交互对话模式，直接输入任务即可。{RESET}"
-          f"{DIM}{BOLD}/help{RESET}{DIM} 查看命令，{RESET}{DIM}{BOLD}exit{RESET}{DIM} 退出。{RESET}\n")
-
+    print(f"{DIM}进入交互对话模式。{RESET}{DIM}{BOLD}/help{RESET}{DIM} 查看命令，{RESET}"
+          f"{DIM}{BOLD}exit{RESET}{DIM} 退出。{RESET}\n")
+    if manager.current_agent() is None:
+        manager.new()
     plan_mode = bool(args.plan)
+
     while True:
+        name = manager.current or "?"
         try:
-            line = input(f"{GREEN}{BOLD}你>{RESET} ").strip()
+            line = input(f"{GREEN}{BOLD}[{name}]{RESET} 你> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n再见。")
             break
@@ -143,9 +187,10 @@ def _repl(agent: Agent, client: DeepSeekClient, config: Config, args) -> int:
             print("再见。")
             break
         if line.startswith("/"):
-            plan_mode = _handle_command(line, plan_mode, agent, client)
+            plan_mode = _handle_command(line, plan_mode, manager, client)
             continue
 
+        agent = manager.current_agent() or manager.new()
         streamed: list[str] = []
         on_text, on_plan, on_tool_call, on_tool_result = _make_callbacks(streamed)
         if plan_mode:
@@ -185,14 +230,6 @@ def main() -> int:
         # 交互确认模式下禁用并发，避免多个命令同时在子线程里弹 input() 询问
         config.parallel_tools = False
 
-    history = None
-    if args.resume:
-        try:
-            history = json.loads(Path(args.resume).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as e:
-            print(f"[错误] 无法读取会话文件：{e}")
-            return 1
-
     confirm = None
     if args.ask:
         def confirm(command: str) -> bool:
@@ -201,14 +238,18 @@ def main() -> int:
 
     ws = Workspace(config.workdir, confirm=confirm, max_output_chars=config.max_output_chars)
     client = DeepSeekClient(config)
-    agent = Agent(config, client, ToolRegistry(ws))
+    manager = SessionManager(config, client, ToolRegistry(ws))
+
+    if args.resume:
+        try:
+            manager.load(args.resume)
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            print(f"[错误] 无法读取会话文件：{e}")
+            return 1
 
     if args.task:
-        return _single_shot(agent, client, config, args, history)
-
-    if history:
-        agent.load_history(history)
-    return _repl(agent, client, config, args)
+        return _single_shot(manager, client, config, args)
+    return _repl(manager, client, config, args)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,81 @@
+"""会话管理：多个命名对话的创建、切换、删除与持久化。
+
+每个会话是一个独立的 Agent，拥有独立的对话历史（ContextManager），
+共享同一个模型客户端与工具注册表。持久化格式为 {会话名: [消息列表]}，
+同时兼容旧版「单个消息列表」的格式。
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from agent import Agent
+from config import Config
+from llm import ChatProvider
+from tools import ToolRegistry
+
+
+class SessionManager:
+    def __init__(self, config: Config, client: ChatProvider, tools: ToolRegistry):
+        self.config = config
+        self.client = client
+        self.tools = tools
+        self.sessions: dict[str, Agent] = {}
+        self.current: str | None = None
+
+    # ---- 会话操作 ----
+    def new(self, name: str | None = None) -> Agent:
+        name = name or self._auto_name()
+        if name in self.sessions:
+            raise ValueError(f"会话 '{name}' 已存在，请换一个名字或 /switch 切换")
+        agent = Agent(self.config, self.client, self.tools)
+        self.sessions[name] = agent
+        self.current = name
+        return agent
+
+    def switch(self, name: str) -> Agent | None:
+        if name not in self.sessions:
+            return None
+        self.current = name
+        return self.sessions[name]
+
+    def remove(self, name: str) -> bool:
+        if name not in self.sessions:
+            return False
+        del self.sessions[name]
+        if self.current == name:
+            self.current = next(iter(self.sessions), None)
+        return True
+
+    def current_agent(self) -> Agent | None:
+        return self.sessions.get(self.current) if self.current else None
+
+    def names(self) -> list[str]:
+        return list(self.sessions)
+
+    def _auto_name(self) -> str:
+        i = 1
+        while f"会话{i}" in self.sessions:
+            i += 1
+        return f"会话{i}"
+
+    # ---- 持久化 ----
+    def save(self, path: str) -> None:
+        data = {name: agent.dump_history() for name, agent in self.sessions.items()}
+        Path(path).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def load(self, path: str) -> None:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        # 兼容旧版单会话格式（纯消息列表）
+        if isinstance(raw, list):
+            raw = {"会话1": raw}
+        if not isinstance(raw, dict):
+            raise ValueError("会话文件格式不正确：应为 {会话名: [消息]} 的 JSON 对象")
+        self.sessions = {}
+        for name, msgs in raw.items():
+            agent = Agent(self.config, self.client, self.tools)
+            agent.load_history(msgs)
+            self.sessions[name] = agent
+        self.current = next(iter(self.sessions), None)

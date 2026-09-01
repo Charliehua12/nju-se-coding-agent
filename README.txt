@@ -7,7 +7,7 @@ https://github.com/Charliehua12/nju-se-coding-agent
 1. 环境：Python 3.10+，无需安装任何第三方库（仅用标准库）。
 2. 配置密钥：复制 .env.example 为 .env 填入 DEEPSEEK_API_KEY，
    或 export DEEPSEEK_API_KEY=...。
-3. 运行：python main.py "任务描述"；不带参数则进入交互对话模式。
+3. 运行：python main.py "任务描述"；不带参数则进入交互对话模式（多会话可切换）。
    可选：--workdir 指定工作目录；--max-iter 最大步数；--ask 命令前人工确认。
 
 三、特色功能

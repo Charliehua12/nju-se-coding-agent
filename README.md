@@ -46,12 +46,19 @@ python main.py
 
 | 命令 | 作用 |
 |---|---|
+| `/new [名称]` | 新建会话（缺省自动命名），并切换到它 |
+| `/list` | 列出所有会话（`*` 标记当前） |
+| `/switch <名称>` | 切换到指定会话 |
+| `/del <名称>` | 删除指定会话 |
+| `/save [文件]` | 保存全部会话（默认 sessions.json） |
+| `/load <文件>` | 从文件加载会话 |
+| `/clear` | 清空当前会话 |
 | `/plan` | 切换计划模式（先出计划再执行） |
-| `/save <文件>` | 保存当前会话为 JSON |
-| `/clear` | 清空对话，重新开始 |
 | `/usage` | 显示累计 token 消耗 |
 | `/help` | 显示帮助 |
 | `exit` / `quit` | 退出 |
+
+每个会话拥有独立的对话历史，可互不干扰地并行推进多个任务；`/save` + `/load` 支持跨进程持久化与恢复。
 
 ## 工作原理
 
@@ -109,10 +116,11 @@ python main.py
 ## 目录结构
 
 ```
-main.py          命令行入口（单次执行 + 交互 REPL + 会话持久化）
+main.py          命令行入口（单次执行 + 交互 REPL + 多会话 + 持久化）
 agent.py         主循环 + 终止条件 + 并发执行 + 计划/摘要编排
 llm.py           ChatProvider 协议 + DeepSeek 客户端（标准库 HTTP + SSE 流式解析）
 context.py       对话历史、token 估算、三级上下文压缩
+session.py       会话管理：多会话创建/切换/删除/持久化
 parser.py        模型输出解析（工具参数 JSON 容错、content 兜底识别）
 config.py        配置（环境变量 / .env）
 tools/
