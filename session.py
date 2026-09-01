@@ -61,12 +61,24 @@ class SessionManager:
 
     # ---- 持久化 ----
     def save(self, path: str) -> None:
+        """保存全部会话为 {会话名: [消息]}。"""
         data = {name: agent.dump_history() for name, agent in self.sessions.items()}
         Path(path).write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    def save_one(self, path: str, name: str) -> None:
+        """只保存指定会话；文件仍写成 {会话名: [消息]}，便于 /load 加载任意一个。"""
+        if name not in self.sessions:
+            raise KeyError(f"会话 '{name}' 不存在")
+        Path(path).write_text(
+            json.dumps({name: self.sessions[name].dump_history()},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
     def load(self, path: str) -> None:
+        """从文件加载会话。若文件含多个会话，全部载入并切到第一个。"""
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         # 兼容旧版单会话格式（纯消息列表）
         if isinstance(raw, list):
@@ -79,3 +91,17 @@ class SessionManager:
             agent.load_history(msgs)
             self.sessions[name] = agent
         self.current = next(iter(self.sessions), None)
+
+    def load_one(self, path: str, name: str) -> None:
+        """只加载文件中的指定会话（若文件只有一个会话，则直接加载它）。"""
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            raw = {"会话1": raw}
+        if not isinstance(raw, dict):
+            raise ValueError("会话文件格式不正确：应为 {会话名: [消息]} 的 JSON 对象")
+        if name not in raw:
+            raise KeyError(f"会话 '{name}' 不在文件 {path} 中（可用：{', '.join(raw)}）")
+        if name not in self.sessions:
+            self.sessions[name] = Agent(self.config, self.client, self.tools)
+        self.sessions[name].load_history(raw[name])
+        self.current = name

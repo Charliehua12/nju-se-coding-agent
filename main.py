@@ -16,7 +16,7 @@ from pathlib import Path
 from config import Config
 from llm import DeepSeekClient
 from session import SessionManager
-from tools import ToolRegistry, Workspace
+from tools import RequestDenied, ToolRegistry, Workspace
 
 # 轻量 ANSI 颜色（不引入 rich）
 RESET = "\033[0m"
@@ -88,24 +88,26 @@ def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config
     return 0
 
 
-def _handle_command(line: str, plan_mode: bool, manager: SessionManager, client: DeepSeekClient) -> bool:
-    """处理 / 开头的交互命令，返回新的 plan_mode。"""
+def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionManager,
+                    client: DeepSeekClient) -> tuple[bool, bool]:
+    """处理 / 开头的交互命令，返回新的 (plan_mode, approve)。"""
     parts = line.split(maxsplit=1)
     c = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
 
     if c == "/help":
         print("可用命令：")
-        print(f"  {BOLD}/new [名称]{RESET}    新建会话（缺省自动命名）")
-        print(f"  {BOLD}/list{RESET}         列出所有会话")
-        print(f"  {BOLD}/switch <名称>{RESET} 切换到指定会话")
-        print(f"  {BOLD}/del <名称>{RESET}    删除指定会话")
-        print(f"  {BOLD}/save [文件]{RESET}   保存全部会话（默认 sessions.json）")
-        print(f"  {BOLD}/load <文件>{RESET}   从文件加载会话")
-        print(f"  {BOLD}/clear{RESET}         清空当前会话")
-        print(f"  {BOLD}/plan{RESET}          切换计划模式（当前 {'开' if plan_mode else '关'}）")
-        print(f"  {BOLD}/usage{RESET}         显示累计 token 消耗")
-        print(f"  {BOLD}exit{RESET}            退出")
+        print(f"  {BOLD}/new [名称]{RESET}      新建会话（缺省自动命名）")
+        print(f"  {BOLD}/list{RESET}            列出所有会话")
+        print(f"  {BOLD}/switch <名称>{RESET}   切换到指定会话")
+        print(f"  {BOLD}/del <名称>{RESET}      删除指定会话")
+        print(f"  {BOLD}/save [会话] [文件]{RESET} 保存会话（缺省全部 → sessions.json）")
+        print(f"  {BOLD}/load <会话> [文件]{RESET} 从文件加载单个会话")
+        print(f"  {BOLD}/clear{RESET}           清空当前会话")
+        print(f"  {BOLD}/plan{RESET}            切换计划模式（当前 {'开' if plan_mode else '关'}）")
+        print(f"  {BOLD}/approve{RESET}         切换审查模式（当前 {'开' if approve else '关'}）")
+        print(f"  {BOLD}/usage{RESET}           显示累计 token 消耗")
+        print(f"  {BOLD}exit{RESET}              退出")
     elif c == "/new":
         try:
             manager.new(arg or None)
@@ -134,21 +136,35 @@ def _handle_command(line: str, plan_mode: bool, manager: SessionManager, client:
         else:
             print(f"已删除会话 '{arg}'，当前：'{manager.current}'")
     elif c == "/save":
-        fname = arg or "sessions.json"
-        try:
-            manager.save(fname)
-            print(f"已保存 {len(manager.names())} 个会话到 {fname}")
-        except OSError as e:
-            print(f"[错误] 保存失败：{e}")
-    elif c == "/load":
-        if not arg:
-            print("用法：/load <文件>")
+        # /save [会话名] [文件]
+        if arg:
+            a = arg.split(maxsplit=1)
+            name = a[0]
+            fname = a[1] if len(a) > 1 else "sessions.json"
+            try:
+                manager.save_one(fname, name)
+                print(f"已保存会话 '{name}' 到 {fname}")
+            except (OSError, KeyError) as e:
+                print(f"[错误] {e}")
         else:
             try:
-                manager.load(arg)
-                print(f"已加载 {len(manager.names())} 个会话（当前：'{manager.current}'）")
-            except (OSError, json.JSONDecodeError, ValueError) as e:
+                manager.save("sessions.json")
+                print(f"已保存 {len(manager.names())} 个会话到 sessions.json")
+            except OSError as e:
+                print(f"[错误] 保存失败：{e}")
+    elif c == "/load":
+        # /load [会话名] [文件]
+        if arg:
+            a = arg.split(maxsplit=1)
+            name = a[0]
+            fname = a[1] if len(a) > 1 else "sessions.json"
+            try:
+                manager.load_one(fname, name)
+                print(f"已加载会话 '{name}'，当前：'{manager.current}'")
+            except (OSError, json.JSONDecodeError, ValueError, KeyError) as e:
                 print(f"[错误] 加载失败：{e}")
+        else:
+            print("用法：/load <会话名> [文件]（缺省文件为 sessions.json）")
     elif c == "/clear":
         agent = manager.current_agent()
         if agent:
@@ -157,12 +173,30 @@ def _handle_command(line: str, plan_mode: bool, manager: SessionManager, client:
     elif c == "/plan":
         plan_mode = not plan_mode
         print(f"计划模式：{'开' if plan_mode else '关'}")
+    elif c == "/approve":
+        approve = not approve
+        print(f"审查模式：{'开' if approve else '关'}（修改文件/执行命令前需你确认）")
     elif c == "/usage":
         u = client.usage
         print(f"{u.prompt_tokens} prompt + {u.completion_tokens} completion（共 {u.total_tokens}）")
     else:
         print(f"未知命令：{c}（输入 /help 查看）")
-    return plan_mode
+    return plan_mode, approve
+
+
+def _colorize_diff(diff: str) -> str:
+    """给统一 diff 着色：新增绿色、删除红色、块头青色。"""
+    out = []
+    for line in diff.splitlines():
+        if line.startswith("+"):
+            out.append(f"{GREEN}{line}{RESET}")
+        elif line.startswith("-"):
+            out.append(f"{RED}{line}{RESET}")
+        elif line.startswith("@@"):
+            out.append(f"{CYAN}{line}{RESET}")
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args) -> int:
@@ -173,6 +207,7 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args)
     if manager.current_agent() is None:
         manager.new()
     plan_mode = bool(args.plan)
+    approve = bool(config.approve)
 
     while True:
         name = manager.current or "?"
@@ -187,7 +222,7 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args)
             print("再见。")
             break
         if line.startswith("/"):
-            plan_mode = _handle_command(line, plan_mode, manager, client)
+            plan_mode, approve = _handle_command(line, plan_mode, approve, manager, client)
             continue
 
         agent = manager.current_agent() or manager.new()
@@ -217,6 +252,8 @@ def main() -> int:
     parser.add_argument("--max-iter", type=int, default=None, help="最大迭代步数")
     parser.add_argument("--ask", action="store_true", help="执行命令前人工确认")
     parser.add_argument("--plan", action="store_true", help="先制定计划再执行")
+    parser.add_argument("--approve", action="store_true",
+                        help="审查模式：修改文件/执行命令前逐个人工确认（含 diff 预览）")
     parser.add_argument("--save", metavar="FILE", default=None, help="结束后把会话保存到 JSON 文件")
     parser.add_argument("--resume", metavar="FILE", default=None, help="从已保存的会话继续")
     args = parser.parse_args()
@@ -226,8 +263,10 @@ def main() -> int:
         config.workdir = Path(args.workdir).resolve()
     if args.max_iter:
         config.max_iterations = args.max_iter
-    if args.ask:
-        # 交互确认模式下禁用并发，避免多个命令同时在子线程里弹 input() 询问
+    if args.approve:
+        config.approve = True
+    if args.ask or args.approve:
+        # 交互确认/审查模式下禁用并发，避免多个工具同时在子线程里弹 input() 询问
         config.parallel_tools = False
 
     confirm = None
@@ -236,7 +275,31 @@ def main() -> int:
             ans = input(f"{RED}是否执行该命令？{RESET}\n  {command}\n[y/N] ").strip().lower()
             return ans in ("y", "yes")
 
-    ws = Workspace(config.workdir, confirm=confirm, max_output_chars=config.max_output_chars)
+    approve_cb = None
+    if config.approve:
+        def approve_cb(action: str, full_preview: str, short_preview: str) -> bool:
+            if action.startswith("execute_command"):
+                print(f"{BOLD}{YELLOW}将执行命令：{RESET}{full_preview}")
+            else:
+                print(f"{BOLD}{YELLOW}文件操作：{action}{RESET}")
+                if full_preview and full_preview != "(内容无变化)":
+                    show = full_preview if len(full_preview) <= 4000 else full_preview[:4000] + "\n..."
+                    print(_colorize_diff(show))
+            ans = input(f"{RED}允许吗？{RESET}{DIM}[y]允许 [n]拒绝 [m]拒绝并留言：{RESET} ").strip().lower()
+            if ans in ("y", "yes"):
+                return True
+            if ans in ("m", "no,", "n+") or ans.startswith("m "):
+                msg = input("给模型留个言（为什么拒绝）：").strip()
+                if msg:
+                    raise RequestDenied(f"用户拒绝并留言：{msg}")
+            return False
+
+    ws = Workspace(
+        config.workdir,
+        confirm=confirm,
+        approve=approve_cb,
+        max_output_chars=config.max_output_chars,
+    )
     client = DeepSeekClient(config)
     manager = SessionManager(config, client, ToolRegistry(ws))
 

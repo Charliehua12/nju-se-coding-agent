@@ -1,4 +1,4 @@
-"""工具系统（沙箱 + 文件/命令/搜索工具）的单元测试。"""
+"""工具系统（沙箱 + 文件/命令/搜索工具 + 审批/diff 预览）的单元测试。"""
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,6 +74,56 @@ class TestTools(unittest.TestCase):
 
     def test_unknown_tool(self):
         self.assertIn("未知工具", self.reg.run("nope", {}))
+
+
+class TestApproval(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_write_denied_returns_denial(self):
+        decisions = [False]
+        ws = Workspace(self.tmp, approve=lambda a, p, s: decisions.pop(0))
+        reg = ToolRegistry(ws)
+        r = reg.run("write_file", {"path": "a.txt", "content": "x"})
+        self.assertIn("拒绝", r)
+        self.assertFalse((self.tmp / "a.txt").exists())
+
+    def test_write_approved_and_diff_shown(self):
+        seen = []
+        ws = Workspace(self.tmp, approve=lambda a, p, s: seen.append((a, p)) or True)
+        reg = ToolRegistry(ws)
+        reg.run("write_file", {"path": "a.txt", "content": "hello\nworld\n"})
+        reg.run("edit_file", {"path": "a.txt", "old_string": "world", "new_string": "nju"})
+        r = reg.run("write_file", {"path": "a.txt", "content": "hello\nnju\n"})
+        self.assertIn("已写入", r)
+        # 审批回调收到过 write_file 与 edit_file，且预览是统一 diff
+        self.assertTrue(any("write_file" in a for a, _ in seen))
+        self.assertTrue(any("edit_file" in a for a, _ in seen))
+        self.assertTrue(any("-world" in p for _, p in seen))
+
+    def test_dry_run_no_write(self):
+        ws = Workspace(self.tmp)
+        reg = ToolRegistry(ws)
+        r = reg.run("write_file", {"path": "b.txt", "content": "data"}, dry_run=True)
+        self.assertIn("[预览]", r)
+        self.assertFalse((self.tmp / "b.txt").exists())
+        # 预览后真正写入
+        reg.run("write_file", {"path": "b.txt", "content": "data"})
+        self.assertIn("data", reg.run("read_file", {"path": "b.txt"}))
+
+    def test_confirm_denied_command(self):
+        ws = Workspace(self.tmp, confirm=lambda c: False)
+        reg = ToolRegistry(ws)
+        r = reg.run("execute_command", {"command": "echo hi"})
+        self.assertIn("拒绝", r)
+
+    def test_delete_denied(self):
+        (self.tmp / "c.txt").write_text("x", encoding="utf-8")
+        ws = Workspace(self.tmp, approve=lambda a, p, s: False)
+        reg = ToolRegistry(ws)
+        r = reg.run("delete_file", {"path": "c.txt"})
+        self.assertIn("拒绝", r)
+        self.assertTrue((self.tmp / "c.txt").exists())
 
 
 if __name__ == "__main__":

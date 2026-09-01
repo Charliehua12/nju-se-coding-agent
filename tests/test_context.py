@@ -60,6 +60,25 @@ class TestContextCompression(unittest.TestCase):
         self.assertEqual(cm.messages[0]["role"], "system")
         self.assertEqual(cm.messages[1]["role"], "user")
 
+    def test_add_caps_message_count(self):
+        cm = ContextManager(10_000, max_messages=6)
+        cm.add({"role": "system", "content": "sys"})
+        cm.add({"role": "user", "content": "任务"})
+        for i in range(20):
+            cm.add({"role": "assistant", "content": f"步骤{i}"})
+        self.assertLessEqual(len(cm.messages), 6)
+        # 最早的 system 与原始任务仍在
+        self.assertEqual(cm.messages[0]["content"], "sys")
+        self.assertEqual(cm.messages[1]["content"], "任务")
+        # 最后一条是最近的消息
+        self.assertEqual(cm.messages[-1]["content"], "步骤19")
+
+    def test_add_truncates_oversized_message(self):
+        cm = ContextManager(1_000_000, max_messages=100)
+        cm.add({"role": "user", "content": "x" * 100_000})
+        self.assertIn("已截断", cm.messages[0]["content"])
+        self.assertLess(len(cm.messages[0]["content"]), 70_000)
+
 
 if __name__ == "__main__":
     unittest.main()

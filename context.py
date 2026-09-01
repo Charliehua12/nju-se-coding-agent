@@ -55,13 +55,29 @@ class ContextManager:
         self,
         budget_tokens: int,
         summarize: Callable[[list[dict]], str | None] | None = None,
+        max_messages: int = 400,
     ):
         self.budget = budget_tokens
         self.summarize = summarize  # 摘要器（可选，通常由 Agent 注入，调用模型）
+        self.max_messages = max_messages  # 消息总数上限（过载保护）
         self.messages: list[dict] = []
 
     def add(self, msg: dict) -> None:
+        """追加消息并做过载保护：
+        超大单条消息直接截断；消息总数超上限时逐轮丢弃最旧非 system/任务消息。
+        """
+        content = msg.get("content") or ""
+        cap = 60_000
+        if isinstance(content, str) and len(content) > cap:
+            msg["content"] = content[:cap] + f"\n...[已截断，原始 {len(content)} 字符]"
         self.messages.append(msg)
+        while len(self.messages) > self.max_messages:
+            self._drop_tool_exchange(2)
+            if len(self.messages) <= self.max_messages:
+                break
+            if len(self.messages) <= 2:
+                break
+            del self.messages[2]
 
     def total_tokens(self) -> int:
         return sum(_msg_tokens(m) for m in self.messages)
@@ -70,7 +86,11 @@ class ContextManager:
         return self.total_tokens() > self.budget
 
     def compress(self) -> bool:
-        """尝试压缩到预算内，返回是否有变化。"""
+        """尝试压缩到预算内，返回是否有变化。
+
+        与消息追加钩子不同，这里不重复调用 total_tokens()（它本身也是 O(n)），
+        只在确实超预算时执行一次 O(n) 扫描。
+        """
         changed = False
         # 1) 截断旧工具输出
         while self.over_budget():

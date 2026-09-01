@@ -1,7 +1,9 @@
-"""命令执行工具：subprocess + 超时 + 输出捕获。"""
+"""命令执行工具：subprocess + 超时 + 输出捕获 + 人工确认。"""
 from __future__ import annotations
 
 import subprocess
+
+from .errors import RequestDenied
 
 
 def execute_command(ws, args: dict) -> str:
@@ -9,7 +11,9 @@ def execute_command(ws, args: dict) -> str:
     if not command.strip():
         return "错误：命令为空。"
     if ws.confirm is not None and not ws.confirm(command):
-        return "用户拒绝了该命令的执行。"
+        raise RequestDenied(f"用户拒绝了该命令的执行：{command}")
+    if ws.dry_run:
+        return f"[预览] 将执行命令：{command}"
     cwd = ws.resolve(args.get("cwd", "."))
     timeout = int(args.get("timeout") or 60)
     try:

@@ -84,6 +84,37 @@ class TestSessionManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.load(str(path))
 
+    def test_save_one_and_load_one(self):
+        m = make_manager()
+        m.new("a")
+        m.sessions["a"].load_history([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "任务A"},
+        ])
+        m.new("b")
+        m.sessions["b"].load_history([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "任务B"},
+        ])
+        path = Path(tempfile.mkdtemp()) / "single.json"
+
+        m.save_one(str(path), "a")
+        m2 = make_manager()
+        m2.load_one(str(path), "a")
+        self.assertEqual(m2.current, "a")
+        self.assertEqual(m2.sessions["a"].dump_history()[1]["content"], "任务A")
+
+        # 单会话文件里只有 a
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(list(data), ["a"])
+
+    def test_load_one_missing_session(self):
+        m = make_manager()
+        path = Path(tempfile.mkdtemp()) / "single.json"
+        path.write_text(json.dumps({"a": []}), encoding="utf-8")
+        with self.assertRaises(KeyError):
+            m.load_one(str(path), "不存在")
+
 
 if __name__ == "__main__":
     unittest.main()

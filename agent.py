@@ -50,6 +50,7 @@ class Agent:
         self.client = client
         self.tools = tools
         self.context = ContextManager(config.context_budget_tokens, summarize=self._summarize)
+        self._result_cache: dict[tuple[str, str], str] = {}
         self._started = False
 
     # ---- 会话生命周期 ----
@@ -87,7 +88,7 @@ class Agent:
     ) -> str:
         """在既有会话中追加一条用户指令并执行一轮，返回最终回答。"""
         self._ensure_started()
-        self.context.add({"role": "user", "content": message})
+        self.context.add({"role": "user", "content": message[: self.config.max_input_chars]})
         if plan_first:
             plan = self._make_plan(on_plan)
             if plan:
@@ -125,6 +126,13 @@ class Agent:
                 )
             except LLMError as e:
                 return f"[错误] 与模型通信失败：{e}"
+            # 模型输出限长：超出部分截断并提示，避免单条内容撑爆上下文
+            if len(resp.content) > self.config.max_response_chars:
+                resp.content = resp.content[: self.config.max_response_chars]
+                self.context.add({
+                    "role": "user",
+                    "content": "[注意] 你上一条回答过长已被截断，请继续完成。",
+                })
 
             # 兜底：模型把工具调用写进 content 而非 tool_calls 字段的情况
             if not resp.tool_calls:
@@ -139,7 +147,9 @@ class Agent:
 
             # 有工具调用 → 执行并回填结果
             self.context.add(self._assistant_message(resp))
-            results = self._execute_all(resp.tool_calls, on_tool_call, on_tool_result)
+            results, denied = self._execute_all(
+                resp.tool_calls, on_tool_call, on_tool_result
+            )
             for tc, result in zip(resp.tool_calls, results):
                 self.context.add({
                     "role": "tool",
@@ -169,27 +179,41 @@ class Agent:
         return resp.content or ""
 
     # ---- 工具执行 ----
-    def _execute_all(self, tcs: list[ToolCall], on_tool_call, on_tool_result) -> list[str]:
+    def _execute_all(self, tcs: list[ToolCall], on_tool_call, on_tool_result):
         for tc in tcs:
             if on_tool_call:
                 on_tool_call(tc.name, tc.arguments)
-        # 多个工具调用互不依赖（模型在同一次响应里一次性给出），可安全并发
+        # 审批模式下逐条执行，避免多个工具同时在子线程里弹确认框
         if len(tcs) > 1 and self.config.parallel_tools:
+            results = [None] * len(tcs)
+            denied = [False] * len(tcs)
             with ThreadPoolExecutor(max_workers=min(len(tcs), 4)) as pool:
-                results = list(pool.map(self._execute, tcs))
+                futures = [pool.submit(self._execute, tc) for tc in tcs]
+                for i, f in enumerate(futures):
+                    try:
+                        results[i] = f.result()
+                    except Exception as e:
+                        results[i] = f"工具执行出错：{type(e).__name__}: {e}"
         else:
             results = [self._execute(tc) for tc in tcs]
+            denied = [r.startswith("已拒绝") for r in results]
         for result in results:
             if on_tool_result:
                 on_tool_result(result)
-        return results
+        return results, any(denied)
 
     def _execute(self, tc: ToolCall) -> str:
+        key = (tc.name, tc.arguments)
+        if key in self._result_cache:
+            return self._result_cache[key]
         try:
             args = parse_arguments(tc)
         except ParseError as e:
-            return f"参数解析失败：{e}。请修正参数后重试。"
-        return self.tools.run(tc.name, args)
+            result = f"参数解析失败：{e}。请修正参数后重试。"
+        else:
+            result = self.tools.run(tc.name, args)
+        self._result_cache[key] = result
+        return result
 
     # ---- 上下文摘要 ----
     def _summarize(self, msgs: list[dict]) -> str | None:

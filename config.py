@@ -38,6 +38,9 @@ class Config:
     command_timeout: int = 60           # 命令执行超时（秒）
     max_retries: int = 3
     parallel_tools: bool = True  # 同一轮返回的多个工具调用是否并发执行
+    approve: bool = False        # 审查模式：写文件/删文件/执行命令前弹人工确认 + diff 预览
+    max_input_chars: int = 30_000      # 单条用户输入长度上限
+    max_response_chars: int = 16_000   # 单条模型输出长度上限
     workdir: Path = field(default_factory=Path.cwd)
 
     @classmethod
@@ -61,5 +64,8 @@ class Config:
             command_timeout=int(os.environ.get("AGENT_COMMAND_TIMEOUT", "60")),
             max_retries=int(os.environ.get("AGENT_MAX_RETRIES", "3")),
             parallel_tools=os.environ.get("AGENT_PARALLEL", "1").lower() not in ("0", "false", "no"),
+            approve=os.environ.get("AGENT_APPROVE", "0").lower() in ("1", "true", "yes"),
+            max_input_chars=int(os.environ.get("AGENT_MAX_INPUT", "30000")),
+            max_response_chars=int(os.environ.get("AGENT_MAX_RESPONSE", "16000")),
             workdir=workdir,
         )
