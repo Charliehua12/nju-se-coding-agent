@@ -129,7 +129,7 @@ def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config
 
 
 def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionManager,
-                    client: DeepSeekClient) -> tuple[bool, bool]:
+                    client: DeepSeekClient, ws: Workspace) -> tuple[bool, bool]:
     """处理 / 开头的交互命令，返回新的 (plan_mode, approve)。"""
     parts = line.split(maxsplit=1)
     c = parts[0].lower()
@@ -146,6 +146,7 @@ def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionM
         print(f"  {BOLD}/clear{RESET}           清空当前会话")
         print(f"  {BOLD}/plan{RESET}            切换计划模式（当前 {'开' if plan_mode else '关'}）")
         print(f"  {BOLD}/approve{RESET}         切换审查模式（当前 {'开' if approve else '关'}）")
+        print(f"  {BOLD}/review{RESET}          查看/回滚 agent 的全部改动")
         print(f"  {BOLD}/usage{RESET}           显示累计 token 消耗")
         print(f"  {BOLD}exit{RESET}              退出")
     elif c == "/new":
@@ -213,6 +214,8 @@ def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionM
     elif c == "/plan":
         plan_mode = not plan_mode
         print(f"计划模式：{'开' if plan_mode else '关'}")
+    elif c == "/review":
+        _review_changes(ws, arg)
     elif c == "/approve":
         approve = not approve
         manager.approve = approve
@@ -243,6 +246,50 @@ def _colorize_diff(diff: str) -> str:
     return "\n".join(out)
 
 
+def _show_change(ws: Workspace, ch) -> None:
+    """展示一次改动的统一 diff。"""
+    diff = ws.make_diff(ch.before or "", ch.after or "", ch.path)
+    head = f"[{ch.index}] {ch.action} {ch.path}"
+    print(f"{BOLD}{YELLOW}{head}{RESET}")
+    if diff != "(无变化)":
+        print(_colorize_diff(diff))
+
+
+def _review_changes(ws: Workspace, arg: str) -> None:
+    """/review 命令：查看 agent 的改动，支持按序号/全部回滚。"""
+    if not ws.changes:
+        print("（当前没有任何文件改动）")
+        return
+    sub = arg.lower()
+    if sub.startswith("revert"):
+        rest = sub[len("revert"):].strip()
+        if rest == "all":
+            for ch in reversed(ws.changes):
+                ws.revert_change(ch)
+            print(f"已回滚全部 {len(ws.changes)} 项改动。")
+            ws.changes.clear()
+        elif rest.isdigit():
+            n = int(rest)
+            if not (1 <= n <= len(ws.changes)):
+                print(f"[错误] 没有第 {n} 项改动（共 {len(ws.changes)} 项）")
+                return
+            ch = ws.changes.pop(n - 1)
+            ws.revert_change(ch)
+            print(f"已回滚第 {n} 项：{ch.action} {ch.path}")
+        else:
+            print("用法：/review revert <序号|all>")
+    elif sub.isdigit():
+        n = int(sub)
+        if not (1 <= n <= len(ws.changes)):
+            print(f"[错误] 没有第 {n} 项改动（共 {len(ws.changes)} 项）")
+            return
+        _show_change(ws, ws.changes[n - 1])
+    else:
+        print(f"{BOLD}共 {len(ws.changes)} 项改动：{RESET}")
+        for ch in ws.changes:
+            _show_change(ws, ch)
+
+
 def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
           ws: Workspace, approve_cb) -> int:
     print(f"{DIM}工作目录：{config.workdir}{RESET}")
@@ -270,7 +317,7 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
             print("再见。")
             break
         if line.startswith("/"):
-            plan_mode, approve = _handle_command(line, plan_mode, approve, manager, client)
+            plan_mode, approve = _handle_command(line, plan_mode, approve, manager, client, ws)
             continue
 
         agent = manager.current_agent() or manager.new()
@@ -281,6 +328,7 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
         on_text, on_plan, on_tool_call, on_tool_result, flush = _make_callbacks(streamed)
         if plan_mode:
             print(f"{BOLD}{MAGENTA}── 制定执行计划（需你确认后执行）──{RESET}")
+        start_changes = len(ws.changes)
         final = agent.reply(
             line,
             plan_first=plan_mode,
@@ -294,6 +342,9 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
         sys.stdout.write("\n")
         if not streamed:
             print(render_markdown(final))
+        new_changes = len(ws.changes) - start_changes
+        if new_changes:
+            print(f"{DIM}本次改动 {new_changes} 项，/review 查看 diff 或回滚{RESET}")
         print()
     return 0
 

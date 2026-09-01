@@ -126,5 +126,46 @@ class TestApproval(unittest.TestCase):
         self.assertTrue((self.tmp / "c.txt").exists())
 
 
+class TestChangeTracking(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_records_write_edit_delete(self):
+        ws = Workspace(self.tmp)
+        reg = ToolRegistry(ws)
+        reg.run("write_file", {"path": "a.txt", "content": "hello"})
+        reg.run("edit_file", {"path": "a.txt", "old_string": "hello", "new_string": "world"})
+        reg.run("delete_file", {"path": "a.txt"})
+        self.assertEqual([c.action for c in ws.changes], ["write", "edit", "delete"])
+
+    def test_revert_delete_restores(self):
+        ws = Workspace(self.tmp)
+        reg = ToolRegistry(ws)
+        reg.run("write_file", {"path": "a.txt", "content": "hello"})
+        reg.run("delete_file", {"path": "a.txt"})
+        ws.revert_change(ws.changes[1])  # 撤销删除
+        self.assertEqual((self.tmp / "a.txt").read_text(encoding="utf-8"), "hello")
+
+    def test_revert_write_new_removes(self):
+        ws = Workspace(self.tmp)
+        reg = ToolRegistry(ws)
+        reg.run("write_file", {"path": "a.txt", "content": "hello"})
+        ws.revert_change(ws.changes[0])  # 撤销新建
+        self.assertFalse((self.tmp / "a.txt").exists())
+
+    def test_dry_run_no_record(self):
+        ws = Workspace(self.tmp)
+        reg = ToolRegistry(ws)
+        reg.run("write_file", {"path": "b.txt", "content": "x"}, dry_run=True)
+        self.assertEqual(len(ws.changes), 0)
+        self.assertFalse((self.tmp / "b.txt").exists())
+
+    def test_denied_write_no_record(self):
+        ws = Workspace(self.tmp, approve=lambda a, p, s: False)
+        reg = ToolRegistry(ws)
+        reg.run("write_file", {"path": "c.txt", "content": "x"})
+        self.assertEqual(len(ws.changes), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

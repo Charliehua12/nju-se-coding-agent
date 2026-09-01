@@ -35,11 +35,13 @@ def write_file(ws, args: dict) -> str:
         ws.request(f"write_file {path.relative_to(ws.root)}", preview)
     if ws.dry_run:
         return f"[预览] 将写入 {path}：\n{preview}"
+    before = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     except OSError as e:
         return f"写入失败：{e}"
+    ws.record_change("write", path, before, content)
     return f"已写入 {path}（{len(content)} 字符）"
 
 
@@ -64,6 +66,7 @@ def edit_file(ws, args: dict) -> str:
     if ws.dry_run:
         return f"[预览] 将编辑 {path}：\n{preview}"
     path.write_text(new_text, encoding="utf-8")
+    ws.record_change("edit", path, text, new_text)
     return f"已替换 1 处（+{len(new)} -{len(old)} 字符）"
 
 
@@ -85,5 +88,7 @@ def delete_file(ws, args: dict) -> str:
     ws.request(f"delete_file {path.relative_to(ws.root)}", preview="")
     if ws.dry_run:
         return f"[预览] 将删除 {path}"
+    before = path.read_text(encoding="utf-8", errors="replace")
     path.unlink()
+    ws.record_change("delete", path, before, None)
     return f"已删除 {path}"

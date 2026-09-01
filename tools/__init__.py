@@ -22,8 +22,18 @@ from .shell import execute_command
 from .search import search_files
 
 
+@dataclass
+class Change:
+    """一次文件改动，供事后审查与回滚。"""
+    index: int
+    action: str          # "write" | "edit" | "delete"
+    path: str            # 相对工作目录的路径
+    before: str | None   # 改动前内容（新文件为 None）
+    after: str | None    # 改动后内容（删除为 None）
+
+
 class Workspace:
-    """工作目录沙箱：路径约束、输出截断、审批回调。"""
+    """工作目录沙箱：路径约束、输出截断、审批回调、改动追踪。"""
 
     def __init__(self, root: Path, confirm: Callable[[str], bool] | None = None,
                  approve: Callable[[str, str, str], bool] | None = None,
@@ -33,6 +43,7 @@ class Workspace:
         self.approve = approve  # 文件写/改/删的审批（None 表示自动放行）
         self.dry_run = dry_run  # 为 True 时只预览 diff，不真正修改
         self.max_output_chars = max_output_chars
+        self.changes: list[Change] = []  # 改动日志，供 /review 审查与回滚
 
     def resolve(self, p: str) -> Path:
         path = Path(p)
@@ -50,6 +61,42 @@ class Workspace:
             return f"{text[:self.max_output_chars]}\n...[输出过长已截断，原始 {len(text)} 字符]"
         return text
 
+    # ---- 改动追踪（供事后审查 / 回滚） ----
+    def record_change(self, action: str, path: Path, before: str | None, after: str | None) -> None:
+        self.changes.append(Change(
+            index=len(self.changes) + 1,
+            action=action,
+            path=str(path.relative_to(self.root)),
+            before=before,
+            after=after,
+        ))
+
+    def revert_change(self, ch: Change) -> None:
+        """回滚一项改动：逆操作写回磁盘。"""
+        path = self.resolve(ch.path)
+        if ch.action == "write":
+            if ch.before is None:
+                path.unlink(missing_ok=True)  # 新建 → 删除
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(ch.before, encoding="utf-8")  # 覆盖 → 还原
+        elif ch.action == "edit":
+            path.write_text(ch.before or "", encoding="utf-8")  # 还原为编辑前
+        elif ch.action == "delete":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(ch.before or "", encoding="utf-8")  # 删除 → 重建
+
+    def make_diff(self, before: str, after: str, path: str) -> str:
+        """基于历史内容生成统一 diff（用于审查展示）。"""
+        if before == after:
+            return "(无变化)"
+        return "".join(difflib.unified_diff(
+            (before or "").splitlines(keepends=True),
+            (after or "").splitlines(keepends=True),
+            fromfile=f"{path} (before)",
+            tofile=f"{path} (after)",
+        ))
+
     # ---- 审批辅助 ----
     def request(self, action: str, preview: str = "", full_preview: str | None = None) -> None:
         """请求用户审批；被拒绝则抛 RequestDenied。approve 为 None 时自动放行。"""
@@ -64,12 +111,7 @@ class Workspace:
         old = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
         if old == new_content:
             return "(内容无变化)"
-        return "".join(difflib.unified_diff(
-            old.splitlines(keepends=True),
-            new_content.splitlines(keepends=True),
-            fromfile=str(path) + " (before)",
-            tofile=str(path) + " (after)",
-        ))
+        return self.make_diff(old, new_content, str(path))
 
 
 def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
