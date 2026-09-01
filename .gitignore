@@ -9,6 +9,9 @@ __pycache__/
 .venv/
 venv/
 
+# agent 运行时内部状态（记忆 / 大结果落盘），不随项目公开
+.my_agent_core/
+
 # 编辑器 / 系统
 .DS_Store
 .idea/
