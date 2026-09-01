@@ -17,6 +17,7 @@ from config import Config
 from gitwrap import GitWrap
 from llm import DeepSeekClient
 from markdown import MarkdownRenderer, render_markdown
+from memory import MemoryStore
 from session import SessionManager
 from tools import RequestDenied, ToolRegistry, Workspace
 
@@ -400,6 +401,7 @@ def main() -> int:
             return ans in ("y", "yes")
 
     ws = Workspace(config.workdir, confirm=confirm, max_output_chars=config.max_output_chars)
+    ws.memory_store = MemoryStore(config.workdir)  # 长期记忆（跨会话）
     client = DeepSeekClient(config)
     manager = SessionManager(config, client, ToolRegistry(ws))
     gwrap = GitWrap(config.workdir)

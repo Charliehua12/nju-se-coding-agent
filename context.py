@@ -61,6 +61,7 @@ class ContextManager:
         self.summarize = summarize  # 摘要器（可选，通常由 Agent 注入，调用模型）
         self.max_messages = max_messages  # 消息总数上限（过载保护）
         self.messages: list[dict] = []
+        self.calibration = 1.0  # token 估算校准系数（用真实 usage 动态锚定）
 
     def add(self, msg: dict) -> None:
         """追加消息并做过载保护：
@@ -80,7 +81,19 @@ class ContextManager:
             del self.messages[2]
 
     def total_tokens(self) -> int:
-        return sum(_msg_tokens(m) for m in self.messages)
+        return int(sum(_msg_tokens(m) for m in self.messages) * self.calibration)
+
+    def record_usage(self, messages: list[dict], real_prompt_tokens: int) -> None:
+        """用 API 返回的真实 prompt token 反向校准字符估算（usage anchoring）。
+
+        字符估算（中文 1 token/字 等）与真实分词有偏差，每轮用真实值
+        校正比例系数，让上下文预算更贴近实际。
+        """
+        if not real_prompt_tokens:
+            return
+        est = sum(_msg_tokens(m) for m in messages)
+        if est > 0:
+            self.calibration = max(0.3, min(3.0, real_prompt_tokens / est))
 
     def over_budget(self) -> bool:
         return self.total_tokens() > self.budget

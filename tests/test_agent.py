@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent import Agent
+from agent import _extract_summary, Agent
 from config import Config
 from llm import LLMResponse, ToolCall
 from tools import ToolRegistry, Workspace
@@ -118,6 +118,27 @@ class TestPlanReview(unittest.TestCase):
         plans = [m["content"] for m in agent.context.messages
                  if m.get("role") == "assistant"]
         self.assertIn("修订后计划", plans)
+
+
+class TestAgentExtras(unittest.TestCase):
+    def test_extract_summary_strips_tags(self):
+        self.assertEqual(_extract_summary("<analysis>分析</analysis>\n<summary>摘要正文</summary>"), "摘要正文")
+        self.assertEqual(_extract_summary("<summary> 带空格 </summary>"), "带空格")
+        self.assertIsNone(_extract_summary(""))
+        self.assertEqual(_extract_summary("无标签文本"), "无标签文本")
+
+    def test_memory_snapshot_injected_into_system(self):
+        agent, _ = make_agent([LLMResponse(content="ok")])
+        agent.tools.ws.memory_store = type("S", (), {"snapshot": "项目使用 pytest"})()
+        agent.reply("hi")
+        self.assertIn("项目使用 pytest", agent.context.messages[0]["content"])
+
+    def test_all_parallel_safe_requires_read_only(self):
+        agent, _ = make_agent([])
+        read_only = [ToolCall("1", "read_file", "{}"), ToolCall("2", "list_files", "{}")]
+        self.assertTrue(agent._all_parallel_safe(read_only))
+        mixed = [ToolCall("1", "read_file", "{}"), ToolCall("2", "write_file", "{}")]
+        self.assertFalse(agent._all_parallel_safe(mixed))
 
 
 if __name__ == "__main__":

@@ -18,9 +18,14 @@ class TestWorkspace(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ws.resolve("../etc/passwd")
 
-    def test_truncate(self):
+    def test_truncate_spills_large_output(self):
         ws_small = Workspace(self.tmp, max_output_chars=50)
-        self.assertIn("已截断", ws_small.truncate("x" * 200))
+        r = ws_small.truncate("x" * 200)
+        self.assertIn("已保存到", r)
+        # 完整内容落盘可读回
+        results = list((self.tmp / ".my_agent_core" / "results").rglob("*.txt"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].read_text(encoding="utf-8"), "x" * 200)
         self.assertEqual(self.ws.truncate("short"), "short")
 
 
@@ -165,6 +170,23 @@ class TestChangeTracking(unittest.TestCase):
         reg = ToolRegistry(ws)
         reg.run("write_file", {"path": "c.txt", "content": "x"})
         self.assertEqual(len(ws.changes), 0)
+
+
+class TestParallelSafety(unittest.TestCase):
+    def setUp(self):
+        self.reg = ToolRegistry(Workspace(Path(tempfile.mkdtemp())))
+
+    def test_read_only_parallel_safe(self):
+        self.assertTrue(self.reg.is_parallel_safe("read_file"))
+        self.assertTrue(self.reg.is_parallel_safe("list_files"))
+        self.assertTrue(self.reg.is_parallel_safe("search_files"))
+
+    def test_write_not_parallel_safe(self):
+        self.assertFalse(self.reg.is_parallel_safe("write_file"))
+        self.assertFalse(self.reg.is_parallel_safe("edit_file"))
+        self.assertFalse(self.reg.is_parallel_safe("delete_file"))
+        self.assertFalse(self.reg.is_parallel_safe("execute_command"))
+        self.assertFalse(self.reg.is_parallel_safe("不存在的工具"))
 
 
 if __name__ == "__main__":

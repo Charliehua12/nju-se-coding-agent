@@ -79,6 +79,15 @@ class TestContextCompression(unittest.TestCase):
         self.assertIn("已截断", cm.messages[0]["content"])
         self.assertLess(len(cm.messages[0]["content"]), 70_000)
 
+    def test_record_usage_calibrates_estimate(self):
+        cm = ContextManager(100_000)
+        cm.add({"role": "system", "content": "sys"})
+        cm.add({"role": "user", "content": "任务内容"})
+        est = cm.total_tokens()
+        cm.record_usage(cm.messages, est * 2)  # 真实 token 是估算的 2 倍
+        self.assertGreater(cm.total_tokens(), est)
+        self.assertAlmostEqual(cm.total_tokens(), est * 2, delta=2)
+
 
 if __name__ == "__main__":
     unittest.main()

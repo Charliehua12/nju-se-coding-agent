@@ -38,8 +38,19 @@ class GitWrap:
             # 仓库内身份，避免依赖/污染全局 git config
             _git(self.workdir, "config", "user.name", "coding-agent")
             _git(self.workdir, "config", "user.email", "agent@localhost")
+            self._ignore_internal_dirs()
             self.mode = "checkpoint"
         return self.mode
+
+    def _ignore_internal_dirs(self) -> None:
+        """让 checkpoint 忽略内部状态目录（记忆、大结果落盘），保持提交干净。"""
+        gi = self.workdir / ".gitignore"
+        existing = gi.read_text(encoding="utf-8") if gi.is_file() else ""
+        if ".my_agent_core/" not in existing:
+            gi.write_text(existing + "\n.my_agent_core/\n", encoding="utf-8")
+        # 立即提交 .gitignore，避免它自身让仓库一直处于 dirty 状态
+        _git(self.workdir, "add", "-A")
+        _git(self.workdir, "commit", "-q", "-m", "init: ignore agent internal dirs")
 
     def _is_repo(self) -> bool:
         return _git(self.workdir, "rev-parse", "--is-inside-work-tree").strip() == "true"

@@ -6,13 +6,14 @@
   3. 与模型通信失败 → 报错退出。
 
 其它工程化设计：
-  - 同一轮返回的多个工具调用可并发执行（线程池）；
+  - 同一轮返回的多个只读工具调用可并发执行；含写操作则严格串行保因果；
   - 可选「计划先行」：先用模型产出一份计划，再进入执行循环；
   - 上下文压缩时用模型做摘要（通过回调注入 ContextManager）；
   - 会话可复用：reply() 在既有上下文中追加新指令，实现持续对话。
 """
 from __future__ import annotations
 
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
@@ -39,9 +40,21 @@ SYSTEM_PROMPT = """你是一个编程智能体，运行在用户的机器上。�
 PLAN_INSTRUCTION = "请先不要调用任何工具，只输出一个清晰、可执行的分步计划（用编号列表）。"
 
 SUMMARIZE_PROMPT = (
-    "你是上下文压缩器。请把下面的对话历史压缩成简洁摘要，"
-    "保留：关键事实、已做的修改、未完成事项、下一步行动。用中文、分点列出。"
+    "你是上下文压缩器。请把下面的对话历史压缩成简洁摘要。\n"
+    "先用 <analysis> 标签简要分析重点，再在 <summary> 标签内输出正式摘要，"
+    "保留：关键事实、已做的修改、未完成事项、下一步行动。用中文、分点列出。\n"
+    "格式：\n<analysis>...</analysis>\n<summary>...</summary>"
 )
+
+
+def _extract_summary(content: str) -> str | None:
+    """防 Prompt 注入：只提取 <summary> 标签内的正文。
+
+    摘要提示词要求模型用 <analysis>/<summary> 双标签输出；这里剥离标签，
+    防止历史对话中的恶意内容伪造摘要注入。
+    """
+    m = re.search(r"<summary>(.*?)</summary>", content, re.DOTALL)
+    return m.group(1).strip() if m else content.strip() or None
 
 
 class Agent:
@@ -57,10 +70,12 @@ class Agent:
     # ---- 会话生命周期 ----
     def _ensure_started(self) -> None:
         if not self._started:
-            self.context.add({
-                "role": "system",
-                "content": SYSTEM_PROMPT.format(workdir=self.config.workdir),
-            })
+            content = SYSTEM_PROMPT.format(workdir=self.config.workdir)
+            # 注入长期记忆的冻结快照（本会话全程静止，保护前缀缓存）
+            store = getattr(self.tools.ws, "memory_store", None)
+            if store is not None and store.snapshot:
+                content += f"\n\n<memory>\n{store.snapshot}\n</memory>"
+            self.context.add({"role": "system", "content": content})
             self._started = True
 
     def load_history(self, history: list[dict]) -> None:
@@ -161,6 +176,8 @@ class Agent:
                 )
             except LLMError as e:
                 return f"[错误] 与模型通信失败：{e}"
+            # token 估算动态校准：用 API 真实 usage 反向校准字符估算
+            self.context.record_usage(self.context.messages, resp.usage.prompt_tokens)
             # 模型输出限长：超出部分截断并提示，避免单条内容撑爆上下文
             if len(resp.content) > self.config.max_response_chars:
                 resp.content = resp.content[: self.config.max_response_chars]
@@ -209,11 +226,17 @@ class Agent:
         for tc in tcs:
             if on_tool_call:
                 on_tool_call(tc.name, tc.arguments)
-        # 审查模式下逐条执行（每步都要弹确认，且用户可能改主意）；否则可并发
-        if self.approve:
+        # 因果时序保护：仅当批内全部为只读工具时才并发；含任何写操作
+        # （或审批模式）则严格按模型输出顺序串行，避免 read 先于 write 读到旧数据。
+        if (
+            self.approve
+            or len(tcs) < 2
+            or not self.config.parallel_tools
+            or not self._all_parallel_safe(tcs)
+        ):
             results = [self._execute(tc) for tc in tcs]
             denied = [r.startswith("已拒绝") for r in results]
-        elif len(tcs) > 1 and self.config.parallel_tools:
+        else:
             results = [None] * len(tcs)
             with ThreadPoolExecutor(max_workers=min(len(tcs), 4)) as pool:
                 futures = [pool.submit(self._execute, tc) for tc in tcs]
@@ -223,13 +246,13 @@ class Agent:
                     except Exception as e:
                         results[i] = f"工具执行出错：{type(e).__name__}: {e}"
             denied = [False] * len(tcs)
-        else:
-            results = [self._execute(tc) for tc in tcs]
-            denied = [r.startswith("已拒绝") for r in results]
         for result in results:
             if on_tool_result:
                 on_tool_result(result)
         return results, any(denied)
+
+    def _all_parallel_safe(self, tcs: list[ToolCall]) -> bool:
+        return all(self.tools.is_parallel_safe(tc.name) for tc in tcs)
 
     def _execute(self, tc: ToolCall) -> str:
         key = (tc.name, tc.arguments)
@@ -258,7 +281,7 @@ class Agent:
             )
         except LLMError:
             return None
-        return resp.content or None
+        return _extract_summary(resp.content or "")
 
     # ---- 消息构造 ----
     def _assistant_message(self, resp: LLMResponse) -> dict:

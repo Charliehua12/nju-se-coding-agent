@@ -18,6 +18,7 @@ from typing import Callable
 
 from .errors import RequestDenied
 from .files import read_file, write_file, edit_file, list_files, delete_file
+from .memory import memory
 from .shell import execute_command
 from .search import search_files
 
@@ -44,6 +45,8 @@ class Workspace:
         self.dry_run = dry_run  # 为 True 时只预览 diff，不真正修改
         self.max_output_chars = max_output_chars
         self.changes: list[Change] = []  # 改动日志，供 /review 审查与回滚
+        self.memory_store = None  # 长期记忆存储（由 main 注入，可选）
+        self._result_counter = 0  # 大结果落盘文件的编号
 
     def resolve(self, p: str) -> Path:
         path = Path(p)
@@ -57,9 +60,21 @@ class Workspace:
         return path
 
     def truncate(self, text: str) -> str:
-        if len(text) > self.max_output_chars:
-            return f"{text[:self.max_output_chars]}\n...[输出过长已截断，原始 {len(text)} 字符]"
-        return text
+        """输出截断：超过阈值时把完整内容落盘，上下文只放头部预览 + 路径占位。
+
+        大结果可重新读取（read_file），因此落盘比直接截断更保值。
+        """
+        if len(text) <= self.max_output_chars:
+            return text
+        results_dir = self.root / ".my_agent_core" / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        name = f"result_{self._result_counter}.txt"
+        self._result_counter += 1
+        path = results_dir / name
+        path.write_text(text, encoding="utf-8", errors="replace")
+        head = text[:2000]
+        return (f"{head}\n...[输出过长：完整 {len(text)} 字符已保存到 "
+                f"{path.relative_to(self.root)}，可用 read_file 读取]")
 
     # ---- 改动追踪（供事后审查 / 回滚） ----
     def record_change(self, action: str, path: Path, before: str | None, after: str | None) -> None:
@@ -146,6 +161,7 @@ class ToolRegistry:
                     "limit": _p("integer", "最多读取行数（缺省读全部）"),
                 }, ["path"]),
                 read_file,
+                parallel_safe=True,
             ),
             "write_file": Tool(
                 _schema("write_file", "创建或覆盖写入一个文件（自动创建父目录）。", {
@@ -167,6 +183,7 @@ class ToolRegistry:
                     "path": _p("string", "相对于工作目录的路径，缺省为工作目录根"),
                 }, []),
                 list_files,
+                parallel_safe=True,
             ),
             "delete_file": Tool(
                 _schema("delete_file", "删除一个文件（不能删除目录）。", {
@@ -180,6 +197,7 @@ class ToolRegistry:
                     "path": _p("string", "搜索的文件或目录（缺省为整个工作目录）"),
                 }, ["query"]),
                 search_files,
+                parallel_safe=True,
             ),
             "execute_command": Tool(
                 _schema("execute_command", "在工作目录下执行一条 shell 命令，返回退出码、stdout 与 stderr。", {
@@ -189,10 +207,24 @@ class ToolRegistry:
                 }, ["command"]),
                 execute_command,
             ),
+            "memory": Tool(
+                _schema("memory", "读写长期记忆（跨会话生效）。把项目约定、踩坑记录、用户偏好等关键事实写入记忆，下次会话仍会保留。", {
+                    "action": _p("string", "操作：add 添加 / replace 替换 / remove 删除"),
+                    "content": _p("string", "add 时要写入的完整内容"),
+                    "old_text": _p("string", "replace/remove 时要定位的旧内容子串"),
+                    "new_content": _p("string", "replace 时的新内容"),
+                }, ["action"]),
+                memory,
+            ),
         }
 
     def schemas(self) -> list[dict]:
         return [t.schema for t in self._tools.values()]
+
+    def is_parallel_safe(self, name: str) -> bool:
+        """该工具是否可安全并发（只读）。用于批执行因果性判断。"""
+        t = self._tools.get(name)
+        return bool(t and t.parallel_safe)
 
     def run(self, name: str, args: dict, dry_run: bool = False) -> str:
         if name not in self._tools:
@@ -220,3 +252,4 @@ class ToolRegistry:
 class Tool:
     schema: dict
     fn: Callable  # (ws: Workspace, args: dict) -> str
+    parallel_safe: bool = False  # 只读/无副作用，可安全并发；写操作须严格串行保因果

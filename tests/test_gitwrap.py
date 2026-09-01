@@ -49,9 +49,9 @@ class TestGitWrap(unittest.TestCase):
         g = GitWrap(self.tmp)
         g.init()
         (self.tmp / "a.txt").write_text("v1", encoding="utf-8")
-        g.checkpoint("唯一提交")
+        g.checkpoint("唯一任务")
         out = g.reset_all()
-        self.assertIn("初始状态", out)
+        self.assertIn("回滚", out)
         self.assertFalse((self.tmp / "a.txt").exists())
 
     def test_watch_mode_never_auto_commits(self):
