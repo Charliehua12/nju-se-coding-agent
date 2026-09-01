@@ -60,6 +60,7 @@ def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config
     print(f"{DIM}工作目录：{config.workdir}{RESET}")
     print(f"{DIM}模型：{config.model}{RESET}\n")
     agent = manager.current_agent() or manager.new()
+    agent.approve = bool(config.approve)
     streamed: list[str] = []
     on_text, on_plan, on_tool_call, on_tool_result = _make_callbacks(streamed)
     if args.plan:
@@ -175,6 +176,10 @@ def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionM
         print(f"计划模式：{'开' if plan_mode else '关'}")
     elif c == "/approve":
         approve = not approve
+        manager.approve = approve
+        agent = manager.current_agent()
+        if agent:
+            agent.approve = approve
         print(f"审查模式：{'开' if approve else '关'}（修改文件/执行命令前需你确认）")
     elif c == "/usage":
         u = client.usage
@@ -199,7 +204,8 @@ def _colorize_diff(diff: str) -> str:
     return "\n".join(out)
 
 
-def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args) -> int:
+def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
+          ws: Workspace, approve_cb) -> int:
     print(f"{DIM}工作目录：{config.workdir}{RESET}")
     print(f"{DIM}模型：{config.model}{RESET}")
     print(f"{DIM}进入交互对话模式。{RESET}{DIM}{BOLD}/help{RESET}{DIM} 查看命令，{RESET}"
@@ -208,6 +214,9 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args)
         manager.new()
     plan_mode = bool(args.plan)
     approve = bool(config.approve)
+    manager.approve = approve
+    if manager.current_agent():
+        manager.current_agent().approve = approve
 
     while True:
         name = manager.current or "?"
@@ -226,6 +235,9 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args)
             continue
 
         agent = manager.current_agent() or manager.new()
+        agent.approve = approve
+        # 同步审查开关：approve 关闭时文件/命令工具不弹窗（--ask 的 confirm 仍生效）
+        ws.approve = approve_cb if approve else None
         streamed: list[str] = []
         on_text, on_plan, on_tool_call, on_tool_result = _make_callbacks(streamed)
         if plan_mode:
@@ -275,33 +287,31 @@ def main() -> int:
             ans = input(f"{RED}是否执行该命令？{RESET}\n  {command}\n[y/N] ").strip().lower()
             return ans in ("y", "yes")
 
-    approve_cb = None
-    if config.approve:
-        def approve_cb(action: str, full_preview: str, short_preview: str) -> bool:
-            if action.startswith("execute_command"):
-                print(f"{BOLD}{YELLOW}将执行命令：{RESET}{full_preview}")
-            else:
-                print(f"{BOLD}{YELLOW}文件操作：{action}{RESET}")
-                if full_preview and full_preview != "(内容无变化)":
-                    show = full_preview if len(full_preview) <= 4000 else full_preview[:4000] + "\n..."
-                    print(_colorize_diff(show))
-            ans = input(f"{RED}允许吗？{RESET}{DIM}[y]允许 [n]拒绝 [m]拒绝并留言：{RESET} ").strip().lower()
-            if ans in ("y", "yes"):
-                return True
-            if ans in ("m", "no,", "n+") or ans.startswith("m "):
-                msg = input("给模型留个言（为什么拒绝）：").strip()
-                if msg:
-                    raise RequestDenied(f"用户拒绝并留言：{msg}")
-            return False
-
-    ws = Workspace(
-        config.workdir,
-        confirm=confirm,
-        approve=approve_cb,
-        max_output_chars=config.max_output_chars,
-    )
+    ws = Workspace(config.workdir, confirm=confirm, max_output_chars=config.max_output_chars)
     client = DeepSeekClient(config)
     manager = SessionManager(config, client, ToolRegistry(ws))
+
+    def approve_cb(action: str, full_preview: str, short_preview: str) -> bool:
+        # 动态读取当前开关：REPL 里 /approve 切换即时生效
+        if not manager.approve:
+            return True  # 未开启审查 → 自动放行
+        if action.startswith("execute_command"):
+            print(f"{BOLD}{YELLOW}将执行命令：{RESET}{full_preview}")
+        else:
+            print(f"{BOLD}{YELLOW}文件操作：{action}{RESET}")
+            if full_preview and full_preview != "(内容无变化)":
+                show = full_preview if len(full_preview) <= 4000 else full_preview[:4000] + "\n..."
+                print(_colorize_diff(show))
+        ans = input(f"{RED}允许吗？{RESET}{DIM}[y]允许 [n]拒绝 [m]拒绝并留言：{RESET} ").strip().lower()
+        if ans in ("y", "yes"):
+            return True
+        if ans.startswith("m"):
+            msg = input("给模型留个言（为什么拒绝）：").strip()
+            if msg:
+                raise RequestDenied(f"用户拒绝并留言：{msg}")
+        return False
+
+    ws.approve = approve_cb
 
     if args.resume:
         try:
@@ -312,7 +322,7 @@ def main() -> int:
 
     if args.task:
         return _single_shot(manager, client, config, args)
-    return _repl(manager, client, config, args)
+    return _repl(manager, client, config, args, ws, approve_cb)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,10 @@ def execute_command(ws, args: dict) -> str:
     command = args.get("command", "")
     if not command.strip():
         return "错误：命令为空。"
-    if ws.confirm is not None and not ws.confirm(command):
+    if ws.approve is not None:
+        # 审查模式下命令也需逐条确认（approve 关闭时回调自动放行）
+        ws.request(f"execute_command {command}", preview=command)
+    elif ws.confirm is not None and not ws.confirm(command):
         raise RequestDenied(f"用户拒绝了该命令的执行：{command}")
     if ws.dry_run:
         return f"[预览] 将执行命令：{command}"

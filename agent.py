@@ -52,6 +52,7 @@ class Agent:
         self.context = ContextManager(config.context_budget_tokens, summarize=self._summarize)
         self._result_cache: dict[tuple[str, str], str] = {}
         self._started = False
+        self.approve = False  # 审查开关：可在运行中切换（REPL 的 /approve）
 
     # ---- 会话生命周期 ----
     def _ensure_started(self) -> None:
@@ -183,10 +184,12 @@ class Agent:
         for tc in tcs:
             if on_tool_call:
                 on_tool_call(tc.name, tc.arguments)
-        # 审批模式下逐条执行，避免多个工具同时在子线程里弹确认框
-        if len(tcs) > 1 and self.config.parallel_tools:
+        # 审查模式下逐条执行（每步都要弹确认，且用户可能改主意）；否则可并发
+        if self.approve:
+            results = [self._execute(tc) for tc in tcs]
+            denied = [r.startswith("已拒绝") for r in results]
+        elif len(tcs) > 1 and self.config.parallel_tools:
             results = [None] * len(tcs)
-            denied = [False] * len(tcs)
             with ThreadPoolExecutor(max_workers=min(len(tcs), 4)) as pool:
                 futures = [pool.submit(self._execute, tc) for tc in tcs]
                 for i, f in enumerate(futures):
@@ -194,6 +197,7 @@ class Agent:
                         results[i] = f.result()
                     except Exception as e:
                         results[i] = f"工具执行出错：{type(e).__name__}: {e}"
+            denied = [False] * len(tcs)
         else:
             results = [self._execute(tc) for tc in tcs]
             denied = [r.startswith("已拒绝") for r in results]
@@ -211,6 +215,7 @@ class Agent:
         except ParseError as e:
             result = f"参数解析失败：{e}。请修正参数后重试。"
         else:
+            # 审批由 Workspace.approve 回调驱动（工具内部 request），无需在此传 dry_run
             result = self.tools.run(tc.name, args)
         self._result_cache[key] = result
         return result

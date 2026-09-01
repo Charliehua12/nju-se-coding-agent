@@ -51,17 +51,10 @@ class Workspace:
         return text
 
     # ---- 审批辅助 ----
-    def request(
-        self,
-        action: str,  # 例如 "write_file a.py" / "执行命令：python3 a.py"
-        preview: str = "",  # diff 或命令详情，展示给用户
-        full_preview: str | None = None,  # 截断前的完整预览
-    ) -> None:
-        """请求用户审批；被拒绝则抛 RequestDenied。"""
+    def request(self, action: str, preview: str = "", full_preview: str | None = None) -> None:
+        """请求用户审批；被拒绝则抛 RequestDenied。approve 为 None 时自动放行。"""
         if self.approve is None:
             return
-        if self.dry_run:
-            raise RequestDenied("（预览模式，未真正执行）")
         show = full_preview if full_preview is not None else preview
         if not self.approve(action, show, preview):
             raise RequestDenied(f"用户拒绝了该操作：{action}")

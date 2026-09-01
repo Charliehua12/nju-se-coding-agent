@@ -22,6 +22,7 @@ class SessionManager:
         self.tools = tools
         self.sessions: dict[str, Agent] = {}
         self.current: str | None = None
+        self.approve = bool(config.approve)  # 审查开关，可在运行中切换
 
     # ---- 会话操作 ----
     def new(self, name: str | None = None) -> Agent:
