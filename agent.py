@@ -8,7 +8,8 @@
 其它工程化设计：
   - 同一轮返回的多个工具调用可并发执行（线程池）；
   - 可选「计划先行」：先用模型产出一份计划，再进入执行循环；
-  - 上下文压缩时用模型做摘要（通过回调注入 ContextManager）。
+  - 上下文压缩时用模型做摘要（通过回调注入 ContextManager）；
+  - 会话可复用：reply() 在既有上下文中追加新指令，实现持续对话。
 """
 from __future__ import annotations
 
@@ -49,6 +50,50 @@ class Agent:
         self.client = client
         self.tools = tools
         self.context = ContextManager(config.context_budget_tokens, summarize=self._summarize)
+        self._started = False
+
+    # ---- 会话生命周期 ----
+    def _ensure_started(self) -> None:
+        if not self._started:
+            self.context.add({
+                "role": "system",
+                "content": SYSTEM_PROMPT.format(workdir=self.config.workdir),
+            })
+            self._started = True
+
+    def load_history(self, history: list[dict]) -> None:
+        """从保存的会话恢复（--resume / 续跑）。"""
+        self.context.messages = list(history)
+        self._started = True
+
+    def clear(self) -> None:
+        """清空对话，重新开始。"""
+        self.context.messages = []
+        self._started = False
+
+    def dump_history(self) -> list[dict]:
+        """导出当前会话，用于持久化。"""
+        return list(self.context.messages)
+
+    # ---- 对外入口 ----
+    def reply(
+        self,
+        message: str,
+        plan_first: bool = False,
+        on_text: Callable[[str], None] | None = None,
+        on_plan: Callable[[str], None] | None = None,
+        on_tool_call: Callable[[str, str], None] | None = None,
+        on_tool_result: Callable[[str], None] | None = None,
+    ) -> str:
+        """在既有会话中追加一条用户指令并执行一轮，返回最终回答。"""
+        self._ensure_started()
+        self.context.add({"role": "user", "content": message})
+        if plan_first:
+            plan = self._make_plan(on_plan)
+            if plan:
+                self.context.add({"role": "assistant", "content": plan})
+                self.context.add({"role": "user", "content": "计划已确认，请按计划逐步执行。"})
+        return self._loop(on_text, on_tool_call, on_tool_result)
 
     def run(
         self,
@@ -60,22 +105,17 @@ class Agent:
         on_tool_call: Callable[[str, str], None] | None = None,
         on_tool_result: Callable[[str], None] | None = None,
     ) -> str:
+        """单次执行的兼容入口（--resume 时先载入历史）。"""
         if history:
-            self.context.messages = list(history)
-            self.context.add({"role": "user", "content": task})
-        else:
-            self.context.add({
-                "role": "system",
-                "content": SYSTEM_PROMPT.format(workdir=self.config.workdir),
-            })
-            self.context.add({"role": "user", "content": task})
+            self.load_history(history)
+        return self.reply(
+            task, plan_first=plan_first,
+            on_text=on_text, on_plan=on_plan,
+            on_tool_call=on_tool_call, on_tool_result=on_tool_result,
+        )
 
-        if plan_first:
-            plan = self._make_plan(on_plan)
-            if plan:
-                self.context.add({"role": "assistant", "content": plan})
-                self.context.add({"role": "user", "content": "计划已确认，请按计划逐步执行。"})
-
+    # ---- 主循环 ----
+    def _loop(self, on_text, on_tool_call, on_tool_result) -> str:
         for _ in range(self.config.max_iterations):
             self.context.compress()
             try:
@@ -129,12 +169,7 @@ class Agent:
         return resp.content or ""
 
     # ---- 工具执行 ----
-    def _execute_all(
-        self,
-        tcs: list[ToolCall],
-        on_tool_call,
-        on_tool_result,
-    ) -> list[str]:
+    def _execute_all(self, tcs: list[ToolCall], on_tool_call, on_tool_result) -> list[str]:
         for tc in tcs:
             if on_tool_call:
                 on_tool_call(tc.name, tc.arguments)
@@ -184,7 +219,3 @@ class Agent:
                 for i, tc in enumerate(resp.tool_calls)
             ]
         return msg
-
-    def dump_history(self) -> list[dict]:
-        """导出当前会话，用于 --save 持久化。"""
-        return list(self.context.messages)

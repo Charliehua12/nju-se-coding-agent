@@ -13,8 +13,11 @@
 cp .env.example .env        # 编辑 .env 填入 DEEPSEEK_API_KEY
 # 或：export DEEPSEEK_API_KEY=sk-...
 
-# 2. 运行
+# 2. 运行（单次执行）
 python main.py "写一个快速排序的实现并跑通测试"
+
+# 交互对话模式（持续多轮，像 ChatGPT 一样追问）
+python main.py
 
 # 3. 运行单元测试
 python -m unittest discover -s tests -v
@@ -30,6 +33,25 @@ python -m unittest discover -s tests -v
 | `--ask` | 执行 shell 命令前人工确认 |
 | `--save FILE` | 结束后把会话保存为 JSON |
 | `--resume FILE` | 从已保存的会话继续（追问） |
+
+### 交互对话模式
+
+不带任务参数启动即进入 REPL，会话在内存中持续累积，可像聊天一样多轮追问：
+
+```bash
+python main.py
+```
+
+交互命令：
+
+| 命令 | 作用 |
+|---|---|
+| `/plan` | 切换计划模式（先出计划再执行） |
+| `/save <文件>` | 保存当前会话为 JSON |
+| `/clear` | 清空对话，重新开始 |
+| `/usage` | 显示累计 token 消耗 |
+| `/help` | 显示帮助 |
+| `exit` / `quit` | 退出 |
 
 ## 工作原理
 
@@ -87,7 +109,7 @@ python -m unittest discover -s tests -v
 ## 目录结构
 
 ```
-main.py          命令行入口（argparse + 流式展示 + 会话持久化）
+main.py          命令行入口（单次执行 + 交互 REPL + 会话持久化）
 agent.py         主循环 + 终止条件 + 并发执行 + 计划/摘要编排
 llm.py           ChatProvider 协议 + DeepSeek 客户端（标准库 HTTP + SSE 流式解析）
 context.py       对话历史、token 估算、三级上下文压缩
