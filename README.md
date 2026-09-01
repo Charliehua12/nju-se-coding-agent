@@ -57,6 +57,8 @@ python main.py
 | `/plan` | 切换计划模式（先出计划并**人工确认**后执行） |
 | `/approve` | 切换审查模式（改文件/执行命令前逐个确认） |
 | `/review` | 查看/回滚改动（`/review git` 看 git diff，`/review git reset` 回滚 checkpoint） |
+| `/skills` | 列出当前可用的技能（来自 `.agents/skills/`） |
+| `/memory` | 查看长期记忆（项目记忆 MEMORY.md + 用户画像 USER.md） |
 | `/usage` | 显示累计 token 消耗 |
 | `/help` | 显示帮助 |
 | `exit` / `quit` | 退出 |
@@ -118,7 +120,7 @@ python main.py
 
 进入 REPL 时若工作目录**不是**已有 git 仓库，会自动 `git init`（仓库内身份，不污染全局配置），每轮任务有改动就**自动提交 checkpoint**（commit message 用模型的总结）。`/review git` 查看最近一个 checkpoint 的 diff——能覆盖 `execute_command` 的副作用（构建产物、安装的依赖等文件工具追踪不到的部分）；`/review git reset` 一键回滚到上一 checkpoint。若工作目录**已是** git 仓库（如你自己的项目），自动进入「只读监视」模式，不做自动提交与破坏性回滚。
 
-### 5. 上下文有预算、有上限、会校准
+### 6. 上下文有预算、有上限、会校准
 
 - 三级压缩：截断旧工具输出 → LLM 摘要早期历史 → 兜底丢弃最旧轮次，始终保住 `system` 与原始任务；
 - 过载保护：单条消息超 60000 字符自动截断、消息总数超上限自动清理最旧轮次；
@@ -127,19 +129,23 @@ python main.py
 - **摘要防注入**：LLM 摘要用 `<analysis>`/`<summary>` 双标签，提取时只取 `<summary>` 正文，防止历史中的恶意内容伪造摘要；
 - 用户输入与模型输出各有长度上限，从源头防止上下文失控。
 
-### 6. 长期记忆（跨会话）
+### 7. 长期记忆（跨会话）
 
-agent 有 `memory` 工具 + 工作目录 `MEMORY.md`：可把项目约定、踩坑记录、用户偏好写入长期记忆，**下次会话仍生效**。关键设计是**冻结快照**——记忆在启动时注入 system prompt 后本会话全程静止，既不污染当前上下文也保护前缀缓存；写操作只落盘、不动快照，新记忆下个会话生效。
+agent 有 `memory` 工具 + 工作目录 `.my_agent_core/memory/`：可把项目约定、踩坑记录、用户偏好写入长期记忆，**下次会话仍生效**。两类记忆**分文件存储**：`MEMORY.md`（项目事实，上限 2200 字符）与 `USER.md`（用户偏好画像，上限 1375 字符），`memory` 工具用 `target=memories|user` 选择写入目标。关键设计是**冻结快照**——记忆在启动时注入 system prompt 后本会话全程静止，既不污染当前上下文也保护前缀缓存；写操作只落盘、不动快照，新记忆下个会话生效。
 
-### 7. 并发工具执行：因果时序保护
+### 8. 声明式技能（Skills）
+
+技能是 `.agents/skills/<技能名>/SKILL.md` 组成的**声明式扩展**：frontmatter 提供 `name`/`description`，正文是按步骤的指令。启动时 agent 只把**轻量技能清单**（名称+描述）注入 system prompt，零正文 token 开销；当任务与技能匹配时，agent 调用 `invoke_skill(name)` **按需加载完整指令**再严格照做——用纯文本声明能力，无需改一行代码。可用 `/skills` 查看、`/memory` 查看记忆。
+
+### 9. 并发工具执行：因果时序保护
 
 模型在同一次响应里给出多个工具调用时，**仅当全部为只读工具才并发**；批内含任何写操作则严格按模型输出顺序串行——避免 `read` 先于 `write` 读到旧数据（因果倒置）。审查/确认模式下自动退回顺序。
 
-### 8. 计划先行：人工审核后再执行
+### 10. 计划先行：人工审核后再执行
 
 `--plan` 让模型先产出分步计划，然后**暂停等你确认**：`y` 按计划执行、`m` 给修改意见重拟、`n` 重新制定、`c` 取消。可多轮往返直到你满意，计划获批后才进入执行循环，避免模型带着未经确认的计划贸然动手。
 
-### 9. 可观测：流式输出 + Markdown 终端渲染
+### 11. 可观测：流式输出 + Markdown 终端渲染
 
 推理文本流式打印；模型输出是 Markdown，终端不会渲染——项目内实现了一个**纯标准库的 Markdown → ANSI 渲染器**（`markdown.py`，按行缓冲避免流式切碎标记），支持标题、加粗、行内代码、代码块、列表；工具调用与结果可视化，结尾统计 token 消耗。
 
@@ -150,9 +156,10 @@ main.py          命令行入口（单次执行 + 交互 REPL + 多会话 + 审�
 agent.py         主循环 + 终止条件 + 并发执行 + 计划/摘要编排 + 审批回喂
 llm.py           ChatProvider 协议 + DeepSeek 客户端（标准库 HTTP + SSE 流式解析）
 context.py       对话历史、token 估算、三级上下文压缩、过载保护
-session.py       会话管理：多会话创建/切换/删除/持久化
+session.py       会话管理：多会话创建/切换/删除/持久化（含校准系数恢复）
 gitwrap.py       Git 集成：自动 init + 每轮任务 checkpoint + git diff/回滚
-memory.py        长期记忆：MEMORY.md + 冻结快照注入（跨会话）
+memory.py        长期记忆：MEMORY.md + USER.md + 冻结快照注入（跨会话）
+skills.py        声明式技能：.agents/skills/ 发现、frontmatter 解析、清单注入
 markdown.py      轻量 Markdown → ANSI 终端渲染器（纯标准库，流式按行缓冲）
 parser.py        模型输出解析（工具参数 JSON 容错、content 兜底识别）
 config.py        配置（环境变量 / .env）
@@ -162,6 +169,8 @@ tools/
   files.py       read_file / write_file / edit_file / list_files / delete_file
   shell.py       execute_command（subprocess + 超时 + 确认）
   search.py      search_files（文件内容 grep）
+  memory.py      memory 工具（target 选择 MEMORY.md / USER.md）
+  skills.py      invoke_skill 工具（按需加载技能正文）
 tests/           核心逻辑的单元测试（标准库 unittest）
 ```
 

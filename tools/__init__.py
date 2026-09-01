@@ -21,6 +21,7 @@ from .files import read_file, write_file, edit_file, list_files, delete_file
 from .memory import memory
 from .shell import execute_command
 from .search import search_files
+from .skills import invoke_skill
 
 
 @dataclass
@@ -45,7 +46,9 @@ class Workspace:
         self.dry_run = dry_run  # 为 True 时只预览 diff，不真正修改
         self.max_output_chars = max_output_chars
         self.changes: list[Change] = []  # 改动日志，供 /review 审查与回滚
-        self.memory_store = None  # 长期记忆存储（由 main 注入，可选）
+        self.memory_store = None  # 项目长期记忆（MEMORY.md，由 main 注入，可选）
+        self.user_store = None  # 用户画像记忆（USER.md，由 main 注入，可选）
+        self.skills: list = []  # 可用技能（由 main 注入 discover_skills 结果）
         self._result_counter = 0  # 大结果落盘文件的编号
 
     def resolve(self, p: str) -> Path:
@@ -209,12 +212,20 @@ class ToolRegistry:
             ),
             "memory": Tool(
                 _schema("memory", "读写长期记忆（跨会话生效）。把项目约定、踩坑记录、用户偏好等关键事实写入记忆，下次会话仍会保留。", {
+                    "target": _p("string", "记忆库：memories 项目事实（缺省）/ user 用户偏好画像"),
                     "action": _p("string", "操作：add 添加 / replace 替换 / remove 删除"),
                     "content": _p("string", "add 时要写入的完整内容"),
                     "old_text": _p("string", "replace/remove 时要定位的旧内容子串"),
                     "new_content": _p("string", "replace 时的新内容"),
                 }, ["action"]),
                 memory,
+            ),
+            "invoke_skill": Tool(
+                _schema("invoke_skill", "加载并返回某个技能的使用说明。当任务与某个技能匹配时先调用它，再严格按其说明执行。", {
+                    "name": _p("string", "技能名称（见系统提示中的可用技能清单）"),
+                }, ["name"]),
+                invoke_skill,
+                parallel_safe=True,
             ),
         }
 

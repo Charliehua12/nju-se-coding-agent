@@ -133,6 +133,20 @@ class TestAgentExtras(unittest.TestCase):
         agent.reply("hi")
         self.assertIn("项目使用 pytest", agent.context.messages[0]["content"])
 
+    def test_user_profile_and_skills_injected(self):
+        agent, _ = make_agent([LLMResponse(content="ok")])
+        agent.tools.ws.user_store = type("S", (), {"snapshot": "用户偏好简洁代码"})()
+        agent.tools.ws.skills = [
+            type("K", (), {"name": "code-review", "description": "审查代码"})()
+        ]
+        agent.reply("hi")
+        content = agent.context.messages[0]["content"]
+        self.assertIn("用户偏好简洁代码", content)
+        self.assertIn("code-review", content)
+        self.assertIn("审查代码", content)
+        # 未注入技能正文，只注入清单（省 token）
+        self.assertNotIn("审查步骤", content)
+
     def test_all_parallel_safe_requires_read_only(self):
         agent, _ = make_agent([])
         read_only = [ToolCall("1", "read_file", "{}"), ToolCall("2", "list_files", "{}")]

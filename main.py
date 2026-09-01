@@ -17,8 +17,9 @@ from config import Config
 from gitwrap import GitWrap
 from llm import DeepSeekClient
 from markdown import MarkdownRenderer, render_markdown
-from memory import MemoryStore
+from memory import MemoryStore, USER_CHAR_LIMIT, USER_FILE
 from session import SessionManager
+from skills import discover_skills
 from tools import RequestDenied, ToolRegistry, Workspace
 
 # 轻量 ANSI 颜色（不引入 rich）
@@ -154,6 +155,8 @@ def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionM
         print(f"  {BOLD}/plan{RESET}            切换计划模式（当前 {'开' if plan_mode else '关'}）")
         print(f"  {BOLD}/approve{RESET}         切换审查模式（当前 {'开' if approve else '关'}）")
         print(f"  {BOLD}/review{RESET}          查看/回滚 agent 的全部改动")
+        print(f"  {BOLD}/skills{RESET}          列出当前可用的技能")
+        print(f"  {BOLD}/memory{RESET}          查看长期记忆（项目记忆 + 用户画像）")
         print(f"  {BOLD}/usage{RESET}           显示累计 token 消耗")
         print(f"  {BOLD}exit{RESET}              退出")
     elif c == "/new":
@@ -233,6 +236,19 @@ def _handle_command(line: str, plan_mode: bool, approve: bool, manager: SessionM
     elif c == "/usage":
         u = client.usage
         print(f"{u.prompt_tokens} prompt + {u.completion_tokens} completion（共 {u.total_tokens}）")
+    elif c == "/skills":
+        skills = ws.skills or []
+        if not skills:
+            print("（当前没有可用技能；在 .agents/skills/<技能名>/SKILL.md 添加即可）")
+        for s in skills:
+            print(f"  {BOLD}{s.name}{RESET}: {s.description}")
+    elif c == "/memory":
+        mem = getattr(ws, "memory_store", None)
+        usr = getattr(ws, "user_store", None)
+        print(f"{BOLD}项目记忆（MEMORY.md）{RESET}")
+        print((mem.snapshot if mem and mem.snapshot else "（空）"))
+        print(f"{BOLD}用户画像（USER.md）{RESET}")
+        print((usr.snapshot if usr and usr.snapshot else "（空）"))
     else:
         print(f"未知命令：{c}（输入 /help 查看）")
     return plan_mode, approve
@@ -313,6 +329,8 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
     print(f"{DIM}模型：{config.model}{RESET}")
     mode = gwrap.init()
     print(f"{DIM}git 模式：{'自动 checkpoint' if mode == 'checkpoint' else '只读监视（已有仓库）'}{RESET}")
+    if ws.skills:
+        print(f"{DIM}技能：{', '.join(s.name for s in ws.skills)}（/skills 查看）{RESET}")
     print(f"{DIM}进入交互对话模式。{RESET}{DIM}{BOLD}/help{RESET}{DIM} 查看命令，{RESET}"
           f"{DIM}{BOLD}exit{RESET}{DIM} 退出。{RESET}\n")
     if manager.current_agent() is None:
@@ -401,7 +419,9 @@ def main() -> int:
             return ans in ("y", "yes")
 
     ws = Workspace(config.workdir, confirm=confirm, max_output_chars=config.max_output_chars)
-    ws.memory_store = MemoryStore(config.workdir)  # 长期记忆（跨会话）
+    ws.memory_store = MemoryStore(config.workdir)  # 项目长期记忆（跨会话）
+    ws.user_store = MemoryStore(config.workdir, file=USER_FILE, char_limit=USER_CHAR_LIMIT)  # 用户画像
+    ws.skills = discover_skills(config.workdir)  # 声明式技能（.agents/skills/）
     client = DeepSeekClient(config)
     manager = SessionManager(config, client, ToolRegistry(ws))
     gwrap = GitWrap(config.workdir)

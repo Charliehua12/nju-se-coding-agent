@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from memory import MemoryStore, USER_CHAR_LIMIT, USER_FILE
 from tools import ToolRegistry, Workspace
 
 
@@ -170,6 +171,31 @@ class TestChangeTracking(unittest.TestCase):
         reg = ToolRegistry(ws)
         reg.run("write_file", {"path": "c.txt", "content": "x"})
         self.assertEqual(len(ws.changes), 0)
+
+
+class TestMemoryTool(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.ws = Workspace(self.tmp)
+        self.ws.memory_store = MemoryStore(self.tmp)
+        self.ws.user_store = MemoryStore(self.tmp, file=USER_FILE, char_limit=USER_CHAR_LIMIT)
+        self.reg = ToolRegistry(self.ws)
+
+    def test_default_target_is_memories(self):
+        self.reg.run("memory", {"action": "add", "content": "项目事实X"})
+        self.assertIn("项目事实X", MemoryStore(self.tmp).snapshot)
+        self.assertEqual(MemoryStore(self.tmp, file=USER_FILE, char_limit=USER_CHAR_LIMIT).snapshot, "")
+
+    def test_user_target_writes_user_md(self):
+        self.reg.run("memory", {"action": "add", "target": "user", "content": "用户偏好Y"})
+        self.assertIn("用户偏好Y",
+                      MemoryStore(self.tmp, file=USER_FILE, char_limit=USER_CHAR_LIMIT).snapshot)
+        self.assertNotIn("用户偏好Y", MemoryStore(self.tmp).snapshot)
+
+    def test_unknown_target_falls_back_to_memories(self):
+        r = self.reg.run("memory", {"action": "add", "target": "xxx", "content": "内容Z"})
+        self.assertIn("已写入", r)
+        self.assertIn("内容Z", MemoryStore(self.tmp).snapshot)
 
 
 class TestParallelSafety(unittest.TestCase):

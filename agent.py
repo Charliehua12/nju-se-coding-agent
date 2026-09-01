@@ -21,6 +21,7 @@ from config import Config
 from context import ContextManager, render_message
 from llm import ChatProvider, LLMError, LLMResponse, ToolCall
 from parser import extract_tool_call_from_content, parse_arguments, ParseError
+from skills import skill_manifest
 from tools import ToolRegistry
 
 SYSTEM_PROMPT = """你是一个编程智能体，运行在用户的机器上。你可以调用工具来读写文件、执行命令，从而自主完成用户交给你的编程任务。
@@ -71,10 +72,17 @@ class Agent:
     def _ensure_started(self) -> None:
         if not self._started:
             content = SYSTEM_PROMPT.format(workdir=self.config.workdir)
-            # 注入长期记忆的冻结快照（本会话全程静止，保护前缀缓存）
+            # 注入长期记忆冻结快照（项目事实 + 用户画像），本会话全程静止保护前缀缓存
             store = getattr(self.tools.ws, "memory_store", None)
             if store is not None and store.snapshot:
                 content += f"\n\n<memory>\n{store.snapshot}\n</memory>"
+            user_store = getattr(self.tools.ws, "user_store", None)
+            if user_store is not None and user_store.snapshot:
+                content += f"\n\n<user_profile>\n{user_store.snapshot}\n</user_profile>"
+            # 注入技能清单（仅名称+描述，省 token；正文由 invoke_skill 按需加载）
+            skills = getattr(self.tools.ws, "skills", None) or []
+            if skills:
+                content += f"\n\n<skills>\n{skill_manifest(skills)}\n</skills>"
             self.context.add({"role": "system", "content": content})
             self._started = True
 
@@ -91,6 +99,13 @@ class Agent:
     def dump_history(self) -> list[dict]:
         """导出当前会话，用于持久化。"""
         return list(self.context.messages)
+
+    def dump_session(self) -> dict:
+        """导出完整会话状态（含 token 校准系数，恢复时免重新校准）。"""
+        return {
+            "messages": list(self.context.messages),
+            "calibration": self.context.calibration,
+        }
 
     # ---- 对外入口 ----
     def reply(

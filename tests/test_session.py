@@ -115,6 +115,27 @@ class TestSessionManager(unittest.TestCase):
         with self.assertRaises(KeyError):
             m.load_one(str(path), "不存在")
 
+    def test_calibration_persisted_on_roundtrip(self):
+        m = make_manager()
+        m.new("a")
+        m.sessions["a"].load_history([{"role": "system", "content": "s"}])
+        m.sessions["a"].context.calibration = 2.5  # 模拟真实 usage 校准后的系数
+        path = Path(tempfile.mkdtemp()) / "cal.json"
+        m.save(str(path))
+
+        m2 = make_manager()
+        m2.load(str(path))
+        self.assertEqual(m2.sessions["a"].context.calibration, 2.5)
+        self.assertEqual(m2.sessions["a"].dump_history()[0]["role"], "system")
+
+    def test_load_legacy_list_still_works_after_format_change(self):
+        # 旧格式会话（纯消息列表）在保存格式升级后仍可加载
+        m = make_manager()
+        path = Path(tempfile.mkdtemp()) / "legacy2.json"
+        path.write_text(json.dumps([{"role": "system", "content": "s"}]), encoding="utf-8")
+        m.load(str(path))
+        self.assertEqual(m.current_agent().context.calibration, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
