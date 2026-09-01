@@ -15,6 +15,7 @@ from pathlib import Path
 
 from config import Config
 from llm import DeepSeekClient
+from markdown import MarkdownRenderer, render_markdown
 from session import SessionManager
 from tools import RequestDenied, ToolRegistry, Workspace
 
@@ -30,24 +31,60 @@ BOLD = "\033[1m"
 
 
 def _make_callbacks(streamed: list[str]):
-    """构造一组显示回调，共享 streamed 列表以判断最终回答是否已流式输出。"""
+    """构造一组显示回调：模型文本用 Markdown 渲染器流式输出。
+
+    返回 (on_text, on_plan, on_tool_call, on_tool_result, flush)，
+    其中 flush 在整轮结束后调用，把缓冲的尾部内容渲染输出。
+    """
+    md_r = MarkdownRenderer(sys.stdout.write)
+
     def on_text(delta: str) -> None:
         streamed.append(delta)
-        sys.stdout.write(f"{CYAN}{delta}{RESET}")
-        sys.stdout.flush()
+        md_r.feed(delta)
 
     def on_plan(delta: str) -> None:
-        sys.stdout.write(f"{MAGENTA}{delta}{RESET}")
-        sys.stdout.flush()
+        md_r.feed(delta)
 
     def on_tool_call(name: str, args_str: str) -> None:
+        md_r.flush()
         sys.stdout.write("\n")
         print(f"{BOLD}{YELLOW}▶ 调用工具 {name}{RESET} {DIM}{args_str[:300]}{RESET}")
 
     def on_tool_result(result: str) -> None:
         print(f"{DIM}{result[:400]}{RESET}")
 
-    return on_text, on_plan, on_tool_call, on_tool_result
+    def flush() -> None:
+        md_r.flush()
+
+    return on_text, on_plan, on_tool_call, on_tool_result, flush
+
+
+def _plan_review_loop(plan: str, revise_fn) -> str | None:
+    """计划的人工审核：可执行 / 修改意见重拟 / 取消，支持多轮往返。"""
+    try:
+        while True:
+            print(f"{BOLD}{MAGENTA}──── 执行计划 ────{RESET}")
+            print(render_markdown(plan))
+            ans = input(f"{YELLOW}[y]按计划执行  [m]修改  [n]重拟  [c]取消{RESET}：").strip().lower()
+            if ans in ("y", "yes"):
+                return plan
+            if ans in ("c", "cancel", "q"):
+                print("已取消，未执行。")
+                return None
+            if ans.startswith("m"):
+                fb = input("修改意见：").strip()
+                if fb:
+                    plan = revise_fn(plan, fb)
+                    print()
+                continue
+            if ans in ("n", "no"):
+                plan = revise_fn(plan, "请重新制定一个更清晰、更可执行的计划。")
+                print()
+                continue
+            print("请输入 y / m / n / c")
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n{DIM}（未获得确认，按计划执行）{RESET}")
+        return plan
 
 
 def _print_usage(client: DeepSeekClient) -> None:
@@ -62,22 +99,24 @@ def _single_shot(manager: SessionManager, client: DeepSeekClient, config: Config
     agent = manager.current_agent() or manager.new()
     agent.approve = bool(config.approve)
     streamed: list[str] = []
-    on_text, on_plan, on_tool_call, on_tool_result = _make_callbacks(streamed)
+    on_text, on_plan, on_tool_call, on_tool_result, flush = _make_callbacks(streamed)
     if args.plan:
-        print(f"{BOLD}{MAGENTA}── 制定执行计划 ──{RESET}")
+        print(f"{BOLD}{MAGENTA}── 制定执行计划（需你确认后执行）──{RESET}")
 
     final = agent.reply(
         args.task,
         plan_first=args.plan,
+        plan_reviewer=_plan_review_loop if args.plan else None,
         on_text=on_text,
-        on_plan=on_plan,
+        on_plan=None,  # 计划不流式打印，统一在审查块展示
         on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
     )
+    flush()
     sys.stdout.write("\n")
     print(f"{GREEN}{BOLD}===== 任务完成 ====={RESET}")
     if not streamed:  # 最终回答未流式输出（例如中途报错）时才补打印
-        print(final)
+        print(render_markdown(final))
 
     _print_usage(client)
     if args.save:
@@ -239,20 +278,22 @@ def _repl(manager: SessionManager, client: DeepSeekClient, config: Config, args,
         # 同步审查开关：approve 关闭时文件/命令工具不弹窗（--ask 的 confirm 仍生效）
         ws.approve = approve_cb if approve else None
         streamed: list[str] = []
-        on_text, on_plan, on_tool_call, on_tool_result = _make_callbacks(streamed)
+        on_text, on_plan, on_tool_call, on_tool_result, flush = _make_callbacks(streamed)
         if plan_mode:
-            print(f"{BOLD}{MAGENTA}── 制定执行计划 ──{RESET}")
+            print(f"{BOLD}{MAGENTA}── 制定执行计划（需你确认后执行）──{RESET}")
         final = agent.reply(
             line,
             plan_first=plan_mode,
+            plan_reviewer=_plan_review_loop if plan_mode else None,
             on_text=on_text,
-            on_plan=on_plan,
+            on_plan=None,  # 计划不流式打印，统一在审查块展示
             on_tool_call=on_tool_call,
             on_tool_result=on_tool_result,
         )
+        flush()
         sys.stdout.write("\n")
         if not streamed:
-            print(final)
+            print(render_markdown(final))
         print()
     return 0
 

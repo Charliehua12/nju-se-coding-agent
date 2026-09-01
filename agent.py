@@ -82,17 +82,28 @@ class Agent:
         self,
         message: str,
         plan_first: bool = False,
+        plan_reviewer=None,
         on_text: Callable[[str], None] | None = None,
         on_plan: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
         on_tool_result: Callable[[str], None] | None = None,
     ) -> str:
-        """在既有会话中追加一条用户指令并执行一轮，返回最终回答。"""
+        """在既有会话中追加一条用户指令并执行一轮，返回最终回答。
+
+        plan_first 时先让模型制定计划；plan_reviewer 若提供，则在执行前
+        把计划交给它人工审核（返回确认后的计划，或 None 表示取消）。
+        """
         self._ensure_started()
         self.context.add({"role": "user", "content": message[: self.config.max_input_chars]})
         if plan_first:
-            plan = self._make_plan(on_plan)
+            plan = self.make_plan(on_plan)
             if plan:
+                if plan_reviewer is not None:
+                    plan = plan_reviewer(
+                        plan, lambda p, fb, cb=on_plan: self._revise_plan(p, fb, cb)
+                    )
+                    if plan is None:
+                        return "[已取消] 计划未获批准，未执行任何操作。"
                 self.context.add({"role": "assistant", "content": plan})
                 self.context.add({"role": "user", "content": "计划已确认，请按计划逐步执行。"})
         return self._loop(on_text, on_tool_call, on_tool_result)
@@ -102,6 +113,7 @@ class Agent:
         task: str,
         plan_first: bool = False,
         history: list[dict] | None = None,
+        plan_reviewer=None,
         on_text: Callable[[str], None] | None = None,
         on_plan: Callable[[str], None] | None = None,
         on_tool_call: Callable[[str, str], None] | None = None,
@@ -111,10 +123,32 @@ class Agent:
         if history:
             self.load_history(history)
         return self.reply(
-            task, plan_first=plan_first,
+            task, plan_first=plan_first, plan_reviewer=plan_reviewer,
             on_text=on_text, on_plan=on_plan,
             on_tool_call=on_tool_call, on_tool_result=on_tool_result,
         )
+
+    # ---- 计划制定与修订 ----
+    def make_plan(self, on_plan=None) -> str:
+        """让模型针对当前任务输出一份分步计划（不写入上下文，方便未获批时丢弃）。"""
+        msgs = self.context.messages + [{"role": "user", "content": PLAN_INSTRUCTION}]
+        try:
+            resp = self.client.chat(msgs, stream=True, on_text=on_plan)
+        except LLMError:
+            return ""
+        return resp.content or ""
+
+    def _revise_plan(self, plan: str, feedback: str, on_plan=None) -> str:
+        """根据用户反馈修订计划，返回修订后的完整计划。"""
+        msgs = self.context.messages + [
+            {"role": "assistant", "content": plan},
+            {"role": "user", "content": f"用户对计划提出如下意见，请据此修改，只输出修订后的完整计划：\n{feedback}"},
+        ]
+        try:
+            resp = self.client.chat(msgs, stream=True, on_text=on_plan)
+        except LLMError:
+            return plan
+        return resp.content or plan
 
     # ---- 主循环 ----
     def _loop(self, on_text, on_tool_call, on_tool_result) -> str:
@@ -169,15 +203,6 @@ class Agent:
         except LLMError as e:
             return f"[错误] {e}"
         return resp.content
-
-    # ---- 计划先行 ----
-    def _make_plan(self, on_plan) -> str:
-        msgs = self.context.messages + [{"role": "user", "content": PLAN_INSTRUCTION}]
-        try:
-            resp = self.client.chat(msgs, stream=True, on_text=on_plan)
-        except LLMError:
-            return ""
-        return resp.content or ""
 
     # ---- 工具执行 ----
     def _execute_all(self, tcs: list[ToolCall], on_tool_call, on_tool_result):

@@ -81,5 +81,44 @@ class TestConversation(unittest.TestCase):
         self.assertEqual([m["role"] for m in agent.context.messages].count("system"), 1)
 
 
+class TestPlanReview(unittest.TestCase):
+    def test_review_cancel_stops_execution(self):
+        agent, _ = make_agent([LLMResponse(content="计划内容")])
+        result = agent.reply("做个任务", plan_first=True,
+                             plan_reviewer=lambda plan, revise: None)
+        self.assertIn("已取消", result)
+        self.assertEqual(len(agent.client.calls), 1)  # 只生成了计划，未进入执行
+
+    def test_review_confirm_then_execute(self):
+        agent, _ = make_agent([
+            LLMResponse(content="计划内容"),
+            LLMResponse(content="完成"),
+        ])
+        result = agent.reply("任务", plan_first=True,
+                             plan_reviewer=lambda plan, revise: plan)
+        self.assertEqual(result, "完成")
+        # 确认后的计划进入上下文
+        roles = [m["role"] for m in agent.context.messages]
+        self.assertEqual(roles.count("user"), 2)  # 任务 + "计划已确认"
+        self.assertEqual(roles.count("assistant"), 2)  # 计划 + 最终回答
+
+    def test_review_revise_loop(self):
+        agent, _ = make_agent([
+            LLMResponse(content="初版计划"),
+            LLMResponse(content="修订后计划"),
+            LLMResponse(content="完成"),
+        ])
+
+        def reviewer(plan, revise):
+            return revise(plan, "不够详细")
+
+        result = agent.reply("任务", plan_first=True, plan_reviewer=reviewer)
+        self.assertEqual(result, "完成")
+        # 修订版计划被写入上下文
+        plans = [m["content"] for m in agent.context.messages
+                 if m.get("role") == "assistant"]
+        self.assertIn("修订后计划", plans)
+
+
 if __name__ == "__main__":
     unittest.main()
