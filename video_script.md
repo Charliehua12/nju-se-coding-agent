@@ -11,11 +11,15 @@
 ## 录制前准备
 
 ```bash
-# 1. 建一个全新演示目录，预放 code-review 技能
-mkdir -p ~/demo-agent/.agents/skills
-cp -r ~/nju-se-coding-agent/.agents/skills/code-review ~/demo-agent/.agents/skills/
+# 1. 建一个全新演示目录 —— ⚠️ 必须在任何 git 仓库之外！
+#    否则 agent 判定"已有仓库"进入只读监视模式，镜头 7 的 git reset 无法演示。
+#    建议用 HOME 下目录（~ 不在任何仓库内），不要在 ~/nju-se-coding-agent 里建。
+mkdir -p ~/demo-agent
 
-# 2. 录制环境
+# 2. code-review 技能是 agent 内置兜底，无需复制（0.4.0 起自动发现自带技能）
+#    若想演示"项目自定义技能"，才在演示目录里放 .agents/skills/（注意拼写带 s）
+
+# 3. 录制环境
 #    - macOS: Cmd+Shift+5 区域录制，或 QuickTime 新建屏幕录制
 #    - 终端字号调大、窗口干净无杂项、深色主题对比清晰
 #    - 每一镜先排练 1~2 遍（模型输出有随机性），确认节奏后正式录
@@ -37,14 +41,14 @@ cp -r ~/nju-se-coding-agent/.agents/skills/code-review ~/demo-agent/.agents/skil
 
 ### 镜头 2｜启动 REPL + 技能发现（0:12–0:22）
 
-- **画面**：进入交互模式，看到「git 模式：自动 checkpoint」与技能清单；输入 `/skills`
+- **画面**：进入交互模式，看到「git 模式：自动 checkpoint」与技能清单（code-review 为内置）；输入 `/skills`
 - **命令**
   ```bash
-  cd ~/demo-agent
+  cd ~/demo-agent          # 仓库外目录 → checkpoint 模式
   python ~/nju-se-coding-agent/main.py
   /skills
   ```
-- **口播**：*"进入交互式 REPL，工作目录自动初始化成 git 仓库。它还支持声明式技能——放一个 SKILL.md，agent 就多一项能力，无需改代码。"*
+- **口播**：*"进入交互式 REPL，工作目录自动初始化成 git 仓库。它还支持声明式技能——agent 自带 code-review，项目里放自己的 SKILL.md 也能扩展，无需改代码。"*
 
 ### 镜头 3｜详细任务 + 计划先行（0:22–0:40）
 
@@ -58,7 +62,7 @@ cp -r ~/nju-se-coding-agent/.agents/skills/code-review ~/demo-agent/.agents/skil
   并用 unittest 写单元测试覆盖这些情况，最后全部跑通验证。
   y        ← 确认计划
   ```
-- **口播**：*"执行前 agent 先给出完整的分步计划，必须我确认才动手。计划不满意还能多轮修改、重拟——这是审查链的第一道门。"*
+- **口播**：*"执行前 agent 先给出完整的分步计划，必·须我确认才动手。计划不满意还能多轮修改、重拟——这是审查链的第一道门。"*
 
 ### 镜头 4｜写源码 + 审批 + 拒绝留言 → 模型自愈（0:40–1:00）
 
