@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import skills as skills_mod
 from skills import (Skill, discover_skills, load_skill, parse_frontmatter,
                     skill_manifest, SKILLS_DIR)
 from tools import ToolRegistry, Workspace
@@ -23,10 +24,17 @@ class TestFrontmatter(unittest.TestCase):
 
 
 class TestDiscover(unittest.TestCase):
+    """项目技能的发现；把内置技能目录指向空处，隔离测试。"""
+
     def setUp(self):
+        self._orig = skills_mod.AGENT_SKILLS_DIR
+        skills_mod.AGENT_SKILLS_DIR = Path(tempfile.mkdtemp()) / "none"  # 无内置技能
         self.dir = Path(tempfile.mkdtemp())
         self.base = self.dir / SKILLS_DIR
         self.base.mkdir(parents=True)
+
+    def tearDown(self):
+        skills_mod.AGENT_SKILLS_DIR = self._orig
 
     def _skill(self, name, content):
         d = self.base / name
@@ -58,6 +66,38 @@ class TestDiscover(unittest.TestCase):
 
     def test_missing_dir(self):
         self.assertEqual(discover_skills(Path(tempfile.mkdtemp())), [])
+
+
+class TestBundledSkills(unittest.TestCase):
+    """内置技能兜底：任何工作目录都能用上 agent 自带技能，项目可覆盖。"""
+
+    def test_bundled_fallback_when_project_has_none(self):
+        empty_dir = Path(tempfile.mkdtemp())
+        names = [s.name for s in discover_skills(empty_dir)]
+        self.assertIn("code-review", names)  # 内置 code-review 兜底可用
+
+    def test_project_skill_merges_with_bundled(self):
+        d = Path(tempfile.mkdtemp())
+        base = d / SKILLS_DIR
+        (base / "my-skill").mkdir(parents=True)
+        (base / "my-skill" / "SKILL.md").write_text(
+            "---\nname: my-skill\ndescription: 自定义\n---\n指令\n", encoding="utf-8")
+        names = [s.name for s in discover_skills(d)]
+        self.assertIn("my-skill", names)
+        self.assertIn("code-review", names)  # 项目技能与内置并存
+
+    def test_project_overrides_bundled_same_name(self):
+        d = Path(tempfile.mkdtemp())
+        base = d / SKILLS_DIR
+        (base / "code-review").mkdir(parents=True)
+        (base / "code-review" / "SKILL.md").write_text(
+            "---\nname: code-review\ndescription: 项目版审查\n---\n项目指令\n",
+            encoding="utf-8")
+        skills = discover_skills(d)
+        cr = next(s for s in skills if s.name == "code-review")
+        # 同名以项目技能为准（正文是项目版而非内置版）
+        self.assertIn("项目指令", cr.load())
+        self.assertEqual(cr.path.resolve(), (base / "code-review" / "SKILL.md").resolve())
 
 
 class TestManifest(unittest.TestCase):

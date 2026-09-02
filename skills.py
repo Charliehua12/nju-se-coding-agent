@@ -1,10 +1,12 @@
 """Skills 技能系统：声明式的可复用能力（参考 Claude Code 风格）。
 
-技能以目录形式放在 <工作目录>/.agents/skills/<技能名>/SKILL.md：
-  - 首部 `---` 分隔的 frontmatter 提供 name / description 元数据；
-  - 正文是 Markdown 指令，按需由 invoke_skill 工具完整加载（省 token）；
-  - agent 启动时只把轻量技能清单（名称 + 描述）注入 system prompt，
-    既让模型知道有哪些能力，又不付出正文的 token 代价。
+技能以目录形式放置：
+  - 项目技能：<工作目录>/.agents/skills/<技能名>/SKILL.md（随项目走）；
+  - 内置技能：<agent 安装目录>/.agents/skills/<技能名>/SKILL.md（随 agent 分发）。
+每个 SKILL.md 首部 `---` 分隔的 frontmatter 提供 name / description 元数据，
+正文是 Markdown 指令，按需由 invoke_skill 工具完整加载（省 token）；
+agent 启动时只把轻量技能清单（名称 + 描述）注入 system prompt，
+既让模型知道有哪些能力，又不付出正文的 token 代价。
 
 零第三方依赖：frontmatter 用极简逐行解析，不引入 YAML 解析库。
 """
@@ -15,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SKILLS_DIR = ".agents/skills"
+# agent 安装目录下的内置技能（随 agent 分发，作为兜底，如 code-review）
+AGENT_SKILLS_DIR = Path(__file__).resolve().parent / SKILLS_DIR
 
 
 @dataclass
@@ -63,18 +67,25 @@ def load_skill(path: Path) -> Skill | None:
 
 
 def discover_skills(workdir: Path) -> list[Skill]:
-    """扫描 <workdir>/.agents/skills/ 下的所有技能目录，按名称排序返回。"""
-    base = workdir / SKILLS_DIR
-    if not base.is_dir():
-        return []
-    skills = []
-    for d in sorted(base.iterdir()):
-        if not d.is_dir():
+    """合并发现技能：项目技能（<workdir>/.agents/skills/）+ 内置技能。
+
+    内置技能随 agent 分发：把 agent 放到任意工作目录运行也能用上自带技能
+    （如 code-review），无需手动复制。同名时以项目技能为准（项目可覆盖内置）。
+    """
+    bases = [(workdir / SKILLS_DIR).resolve(), AGENT_SKILLS_DIR]
+    by_name: dict[str, Skill] = {}
+    seen: set[Path] = set()
+    for base in bases:
+        if not base.is_dir() or base in seen:
             continue
-        skill = load_skill(d / "SKILL.md")
-        if skill:
-            skills.append(skill)
-    return skills
+        seen.add(base)
+        for d in sorted(base.iterdir()):
+            if not d.is_dir():
+                continue
+            skill = load_skill(d / "SKILL.md")
+            if skill:
+                by_name.setdefault(skill.name, skill)  # 先扫到的（项目）优先
+    return [by_name[k] for k in sorted(by_name)]
 
 
 def skill_manifest(skills: list[Skill]) -> str:
